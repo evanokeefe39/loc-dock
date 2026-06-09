@@ -11,6 +11,7 @@ Run:  uv run dock.py
 """
 
 import logging
+import os
 import subprocess
 import threading
 import tkinter as tk
@@ -30,11 +31,11 @@ log = logging.getLogger("loc-dock")
 # ── Config ────────────────────────────────────────────────────────────
 REFRESH_UI_MS = 30_000
 REFRESH_DATA_MS = 60_000
-CLAUDE_DIR = Path.home() / ".claude"
+CLAUDE_DIR = Path(os.environ.get("LOCDOCK_CLAUDE_DIR", Path.home() / ".claude"))
 PROJECTS_DIR = CLAUDE_DIR / "projects"
-REPOS_DIR = Path.home() / "repos"
-CET = ZoneInfo("Europe/Berlin")
-DAY_START_HOUR = 7
+REPOS_DIR = Path(os.environ.get("LOCDOCK_REPOS_DIR", Path.home() / "repos"))
+CET = ZoneInfo(os.environ.get("LOCDOCK_TIMEZONE", "Europe/Berlin"))
+DAY_START_HOUR = int(os.environ.get("LOCDOCK_DAY_START_HOUR", "7"))
 
 PRICING = {
     "input":        15.00,

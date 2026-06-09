@@ -1,1 +1,0 @@
-a floating dock to show lines of code commited and deleted for the day adn number of tokens burned from claude sessions. i think i had another project here that did some floating dock stuff for claude session usage and reset times. 

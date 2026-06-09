@@ -2,7 +2,9 @@
 
 Floating desktop widget that tracks your daily dev metrics at a glance.
 
-![screenshot](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue)
+![screenshot](screenshot.png)
+
+![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue)
 
 ## What it shows
 

@@ -103,9 +103,8 @@ def get_git_loc_timeline(repos_dir: Path, since: datetime) -> list[tuple[datetim
 
 
 def bucket_timeline(points: list[tuple[datetime, int, int]], since: datetime, n_buckets: int = 32) -> list[tuple[int, int]]:
-    """Bucket commit data into n_buckets time slots. Returns list of (added, deleted) per bucket."""
-    now = datetime.now(CET)
-    total_seconds = max((now - since).total_seconds(), 1)
+    """Bucket commit data into n_buckets time slots over a fixed 24h window."""
+    total_seconds = 24 * 3600
     buckets: list[tuple[int, int]] = [(0, 0)] * n_buckets
 
     for ts, added, deleted in points:
@@ -334,8 +333,7 @@ def fmt_tokens(n: int) -> str:
 
 
 def bucket_cost_timeline(points: list[tuple[datetime, float]], since: datetime, n_buckets: int = 32) -> list[float]:
-    now = datetime.now(CET)
-    total_seconds = max((now - since).total_seconds(), 1)
+    total_seconds = 24 * 3600
     buckets = [0.0] * n_buckets
     for ts, cost in points:
         if not isinstance(ts, datetime):
@@ -354,8 +352,7 @@ BLUE   = "#38bdf8"
 def bucket_token_timeline(
     points: list[tuple], since: datetime, n_buckets: int = 32,
 ) -> list[tuple[int, int, int, int]]:
-    now = datetime.now(CET)
-    total_seconds = max((now - since).total_seconds(), 1)
+    total_seconds = 24 * 3600
     buckets = [(0, 0, 0, 0)] * n_buckets
     for row in points:
         ts = row[0]

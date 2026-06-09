@@ -3,9 +3,7 @@
 # dependencies = ["duckdb", "tzdata"]
 # ///
 """
-LOC Dock — landscape floating widget, top-right.
-Sparkline: green adds above x-axis, red deletes below. Day starts 7am CET.
-Token burn stats on the right.
+LOC Dock — floating desktop widget for daily dev metrics.
 
 Run:  uv run dock.py
 """
@@ -34,7 +32,7 @@ REFRESH_DATA_MS = 60_000
 CLAUDE_DIR = Path(os.environ.get("LOCDOCK_CLAUDE_DIR", Path.home() / ".claude"))
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 REPOS_DIR = Path(os.environ.get("LOCDOCK_REPOS_DIR", Path.home() / "repos"))
-CET = ZoneInfo(os.environ.get("LOCDOCK_TIMEZONE", "Europe/Berlin"))
+TZ = ZoneInfo(os.environ.get("LOCDOCK_TIMEZONE", "Europe/Berlin"))
 DAY_START_HOUR = int(os.environ.get("LOCDOCK_DAY_START_HOUR", "7"))
 
 PRICING = {
@@ -47,13 +45,14 @@ PRICING = {
 # ── Colours ──────────────────────────────────────────────────────────
 BG       = "#1a1a2e"
 FG       = "#e0e0e0"
-ACCENT   = "#7c5cfc"
 ACCENT2  = "#a78bfa"
 DIM      = "#6b7280"
 GREEN    = "#34d399"
 RED      = "#ef4444"
 ORANGE   = "#f97316"
 PINK     = "#f472b6"
+YELLOW   = "#facc15"
+BLUE     = "#38bdf8"
 CHART_BG = "#12121f"
 AXIS_CLR = "#333350"
 
@@ -108,8 +107,8 @@ def bucket_timeline(points: list[tuple[datetime, int, int]], since: datetime, n_
     buckets: list[tuple[int, int]] = [(0, 0)] * n_buckets
 
     for ts, added, deleted in points:
-        ts_cet = ts.astimezone(CET)
-        offset = (ts_cet - since).total_seconds()
+        ts_local = ts.astimezone(TZ)
+        offset = (ts_local - since).total_seconds()
         idx = int((offset / total_seconds) * n_buckets)
         idx = max(0, min(n_buckets - 1, idx))
         a, d = buckets[idx]
@@ -338,16 +337,13 @@ def bucket_cost_timeline(points: list[tuple[datetime, float]], since: datetime, 
     for ts, cost in points:
         if not isinstance(ts, datetime):
             continue
-        ts_cet = ts.astimezone(CET) if ts.tzinfo else ts.replace(tzinfo=CET)
-        offset = (ts_cet - since).total_seconds()
+        ts_local = ts.astimezone(TZ) if ts.tzinfo else ts.replace(tzinfo=TZ)
+        offset = (ts_local - since).total_seconds()
         idx = int((offset / total_seconds) * n_buckets)
         idx = max(0, min(n_buckets - 1, idx))
         buckets[idx] += cost
     return buckets
 
-
-YELLOW = "#facc15"
-BLUE   = "#38bdf8"
 
 def bucket_token_timeline(
     points: list[tuple], since: datetime, n_buckets: int = 32,
@@ -360,8 +356,8 @@ def bucket_token_timeline(
             continue
         if not isinstance(ts, datetime):
             continue
-        ts_cet = ts.astimezone(CET) if ts.tzinfo else ts.replace(tzinfo=CET)
-        offset = (ts_cet - since).total_seconds()
+        ts_local = ts.astimezone(TZ) if ts.tzinfo else ts.replace(tzinfo=TZ)
+        offset = (ts_local - since).total_seconds()
         idx = int((offset / total_seconds) * n_buckets)
         idx = max(0, min(n_buckets - 1, idx))
         inp, out, cw, cr = buckets[idx]
@@ -369,11 +365,11 @@ def bucket_token_timeline(
     return buckets
 
 
-def day_start_cet() -> datetime:
-    """Return today's 7am CET. If now < 7am CET, use yesterday's 7am."""
-    now_cet = datetime.now(CET)
-    start = now_cet.replace(hour=DAY_START_HOUR, minute=0, second=0, microsecond=0)
-    if now_cet < start:
+def day_start() -> datetime:
+    """Return today's DAY_START_HOUR in configured timezone. If before that hour, use yesterday's."""
+    now_local = datetime.now(TZ)
+    start = now_local.replace(hour=DAY_START_HOUR, minute=0, second=0, microsecond=0)
+    if now_local < start:
         start -= timedelta(days=1)
     return start
 
@@ -394,7 +390,6 @@ class LocDock(tk.Tk):
         self.configure(bg=BG)
 
         self.store = UsageStore(PROJECTS_DIR)
-        self._buckets: list[tuple[int, int]] = []
         self._git_points: list = []
         self._cost_points: list[tuple[datetime, float]] = []
         self._token_points: list[tuple] = []
@@ -407,7 +402,6 @@ class LocDock(tk.Tk):
         self._chart_modes = ["loc", "cost", "tokens"]
         self._tooltip: tk.Toplevel | None = None
         self._data_loaded = False
-        self._loading = False
         self._spinner_frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
         self._spinner_idx = 0
         self._spinner_job = None
@@ -613,7 +607,7 @@ class LocDock(tk.Tk):
             )
 
     def _draw_loc_chart(self, c, w, h):
-        buckets = bucket_timeline(self._git_points, day_start_cet(), N_BUCKETS)
+        buckets = bucket_timeline(self._git_points, day_start(), N_BUCKETS)
         bottom = h - 12
         c.create_line(0, bottom, w, bottom, fill=AXIS_CLR, width=1)
         self._draw_time_labels(c, w, bottom)
@@ -651,7 +645,7 @@ class LocDock(tk.Tk):
                 c.create_rectangle(x0, y - red_h, x1, y, fill=RED, outline="")
 
     def _draw_cost_chart(self, c, w, h):
-        since = day_start_cet()
+        since = day_start()
         buckets = bucket_cost_timeline(self._cost_points, since, N_BUCKETS)
         bottom = h - 12
         c.create_line(0, bottom, w, bottom, fill=AXIS_CLR, width=1)
@@ -681,7 +675,7 @@ class LocDock(tk.Tk):
             c.create_rectangle(x0, bottom - bh, x1, bottom, fill=ACCENT2, outline="")
 
     def _draw_token_chart(self, c, w, h):
-        since = day_start_cet()
+        since = day_start()
         buckets = bucket_token_timeline(self._token_points, since, N_BUCKETS)
         bottom = h - 12
         c.create_line(0, bottom, w, bottom, fill=AXIS_CLR, width=1)
@@ -729,7 +723,6 @@ class LocDock(tk.Tk):
         self.lbl_spinner.config(text="")
 
     def _load_data(self):
-        self._loading = True
         if not self._data_loaded:
             self._draw_chart()
         self._start_spinner()
@@ -737,7 +730,7 @@ class LocDock(tk.Tk):
 
     def _load_data_bg(self):
         """Heavy I/O: git subprocesses, JSONL filesystem scan. Runs every 60s."""
-        since = day_start_cet()
+        since = day_start()
 
         try:
             self._git_points = get_git_loc_timeline(REPOS_DIR, since)
@@ -774,7 +767,6 @@ class LocDock(tk.Tk):
         self.after(0, self._on_load_done)
 
     def _on_load_done(self):
-        self._loading = False
         self._data_loaded = True
         self._stop_spinner()
         self._update_ui()
@@ -782,11 +774,11 @@ class LocDock(tk.Tk):
 
     def _update_ui(self):
         """Cheap: query cached DuckDB, rebucket, update labels. Runs every 30s."""
-        since = day_start_cet()
-        now_cet = datetime.now(CET)
+        since = day_start()
+        now_local = datetime.now(TZ)
 
         self._time_start_str = since.strftime("%H:%M")
-        self._time_end_str = now_cet.strftime("%H:%M")
+        self._time_end_str = now_local.strftime("%H:%M")
         self._draw_chart()
 
         loc_buckets = bucket_timeline(self._git_points, since, N_BUCKETS)

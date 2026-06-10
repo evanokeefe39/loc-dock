@@ -34,6 +34,7 @@ PROJECTS_DIR = CLAUDE_DIR / "projects"
 REPOS_DIR = Path(os.environ.get("LOCDOCK_REPOS_DIR", Path.home() / "repos"))
 TZ = ZoneInfo(os.environ.get("LOCDOCK_TIMEZONE", "Europe/Berlin"))
 DAY_START_HOUR = int(os.environ.get("LOCDOCK_DAY_START_HOUR", "7"))
+WEEK_START_DAY = int(os.environ.get("LOCDOCK_WEEK_START_DAY", "0"))  # 0=Mon, 6=Sun
 
 PRICING = {
     "input":        15.00,
@@ -112,8 +113,9 @@ def bucket_timeline(points: list[tuple[datetime, int, int]], since: datetime, un
     for ts, added, deleted in points:
         ts_local = ts.astimezone(TZ)
         offset = (ts_local - since).total_seconds()
-        idx = int((offset / total_seconds) * n_buckets)
-        idx = max(0, min(n_buckets - 1, idx))
+        if offset < 0 or offset >= total_seconds:
+            continue
+        idx = min(int((offset / total_seconds) * n_buckets), n_buckets - 1)
         a, d = buckets[idx]
         buckets[idx] = (a + added, d + deleted)
 
@@ -342,8 +344,9 @@ def bucket_cost_timeline(points: list[tuple[datetime, float]], since: datetime, 
             continue
         ts_local = ts.astimezone(TZ) if ts.tzinfo else ts.replace(tzinfo=TZ)
         offset = (ts_local - since).total_seconds()
-        idx = int((offset / total_seconds) * n_buckets)
-        idx = max(0, min(n_buckets - 1, idx))
+        if offset < 0 or offset >= total_seconds:
+            continue
+        idx = min(int((offset / total_seconds) * n_buckets), n_buckets - 1)
         buckets[idx] += cost
     return buckets
 
@@ -361,20 +364,29 @@ def bucket_token_timeline(
             continue
         ts_local = ts.astimezone(TZ) if ts.tzinfo else ts.replace(tzinfo=TZ)
         offset = (ts_local - since).total_seconds()
-        idx = int((offset / total_seconds) * n_buckets)
-        idx = max(0, min(n_buckets - 1, idx))
+        if offset < 0 or offset >= total_seconds:
+            continue
+        idx = min(int((offset / total_seconds) * n_buckets), n_buckets - 1)
         inp, out, cw, cr = buckets[idx]
         buckets[idx] = (inp + row[1], out + row[2], cw + row[3], cr + row[4])
     return buckets
 
 
 def day_start() -> datetime:
-    """Return today's DAY_START_HOUR in configured timezone. If before that hour, use yesterday's."""
     now_local = datetime.now(TZ)
     start = now_local.replace(hour=DAY_START_HOUR, minute=0, second=0, microsecond=0)
     if now_local < start:
         start -= timedelta(days=1)
     return start
+
+
+def week_start() -> datetime:
+    now_local = datetime.now(TZ)
+    today_start = now_local.replace(hour=DAY_START_HOUR, minute=0, second=0, microsecond=0)
+    if now_local < today_start:
+        today_start -= timedelta(days=1)
+    days_since = (today_start.weekday() - WEEK_START_DAY) % 7
+    return today_start - timedelta(days=days_since)
 
 
 # ── GUI ───────────────────────────────────────────────────────────────
@@ -405,6 +417,7 @@ class LocDock(tk.Tk):
         self._sess_active = 0
         self._chart_mode = "loc"
         self._chart_modes = ["loc", "cost", "tokens"]
+        self._time_range = "day"
         self._tooltip: tk.Toplevel | None = None
         self._data_loaded = False
         self._spinner_frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -471,6 +484,17 @@ class LocDock(tk.Tk):
         )
         self.lbl_spinner.pack(side="right", padx=(0, 3))
 
+        btn_font = ("Segoe UI", 7)
+        btn_kw = dict(bg=CHART_BG, fg=DIM, font=btn_font, cursor="hand2",
+                      bd=1, relief="solid", padx=6, pady=0)
+        self.btn_mode = tk.Label(top, text="LOC", **btn_kw)
+        self.btn_mode.pack(side="right", padx=(0, 4))
+        self.btn_mode.bind("<Button-1>", self._click_mode)
+        self.btn_range = tk.Label(top, text="DAY", **btn_kw)
+        self.btn_range.pack(side="right", padx=(0, 4))
+        self.btn_range.bind("<Button-1>", self._click_range)
+        tk.Frame(top, bg=DIM, width=1, height=12).pack(side="right", padx=6)
+
         # ── Chart ──
         self.chart = tk.Canvas(
             root, height=CHART_H, width=1,
@@ -478,7 +502,7 @@ class LocDock(tk.Tk):
         )
         self.chart.pack(fill="x", expand=True, pady=(2, 0))
         self.chart.bind("<Configure>", lambda e: self._draw_chart())
-        self.chart.bind("<Button-1>", self._toggle_chart)
+        self.chart.bind("<Button-1>", self._click_mode)
 
         # ── Bottom row: token breakdown ──
         bot = tk.Frame(root, bg=BG)
@@ -520,10 +544,16 @@ class LocDock(tk.Tk):
         val.pack(side="left")
         return val
 
-    def _toggle_chart(self, event=None):
+    def _click_mode(self, event=None):
         idx = self._chart_modes.index(self._chart_mode)
         self._chart_mode = self._chart_modes[(idx + 1) % len(self._chart_modes)]
-        self._draw_chart()
+        self.btn_mode.config(text=self._chart_mode.upper())
+        self._update_ui()
+
+    def _click_range(self, event=None):
+        self._time_range = "week" if self._time_range == "day" else "day"
+        self.btn_range.config(text=self._time_range.upper())
+        self._update_ui()
 
     def _show_tooltip(self, event=None):
         self._hide_tooltip()
@@ -600,32 +630,37 @@ class LocDock(tk.Tk):
         tick_h = 3
         c.create_text(4, axis_y + 2, text=self._time_start_str,
                        fill=DIM, font=font, anchor="nw")
-        first_tick = since.replace(minute=0, second=0, microsecond=0)
-        if first_tick <= since:
-            first_tick += timedelta(hours=3 - (first_tick.hour % 3) if first_tick.hour % 3 else 3)
-        t = first_tick
-        while t < now:
-            frac = (t - since).total_seconds() / span
-            x = TIME_PAD + frac * (w - 2 * TIME_PAD)
-            if x > TIME_PAD + 12:
-                c.create_line(x, axis_y, x, axis_y + tick_h, fill=AXIS_CLR)
-                c.create_text(x, axis_y + 3, text=t.strftime("%H"),
-                              fill=DIM, font=font, anchor="n")
-            t += timedelta(hours=3)
+        if self._time_range == "week":
+            t = (since + timedelta(days=1)).replace(hour=DAY_START_HOUR, minute=0, second=0, microsecond=0)
+            while t < now:
+                frac = (t - since).total_seconds() / span
+                x = TIME_PAD + frac * (w - 2 * TIME_PAD)
+                if x > TIME_PAD + 12:
+                    c.create_line(x, axis_y, x, axis_y + tick_h, fill=AXIS_CLR)
+                    c.create_text(x, axis_y + 3, text=t.strftime("%a"),
+                                  fill=DIM, font=font, anchor="n")
+                t += timedelta(days=1)
+        else:
+            first_tick = since.replace(minute=0, second=0, microsecond=0)
+            if first_tick <= since:
+                first_tick += timedelta(hours=3 - (first_tick.hour % 3) if first_tick.hour % 3 else 3)
+            t = first_tick
+            while t < now:
+                frac = (t - since).total_seconds() / span
+                x = TIME_PAD + frac * (w - 2 * TIME_PAD)
+                if x > TIME_PAD + 12:
+                    c.create_line(x, axis_y, x, axis_y + tick_h, fill=AXIS_CLR)
+                    c.create_text(x, axis_y + 3, text=t.strftime("%H"),
+                                  fill=DIM, font=font, anchor="n")
+                t += timedelta(hours=3)
 
     def _draw_chrome(self, c, w, y_max_str: str):
-        c.create_text(
-            w - 3, 2, text=self._chart_mode.upper(),
-            fill=DIM, font=("Segoe UI", 6), anchor="ne",
-        )
         if y_max_str:
-            c.create_text(
-                3, 2, text=y_max_str,
-                fill=DIM, font=("Segoe UI", 6), anchor="nw",
-            )
+            c.create_text(3, 2, text=y_max_str,
+                          fill=DIM, font=("Segoe UI", 6), anchor="nw")
 
     def _draw_loc_chart(self, c, w, h):
-        buckets = bucket_timeline(self._git_points, day_start(), datetime.now(TZ), N_BUCKETS)
+        buckets = bucket_timeline(self._git_points, self._range_start(), datetime.now(TZ), N_BUCKETS)
         bottom = h - 18
         c.create_line(0, bottom, w, bottom, fill=AXIS_CLR, width=1)
         self._draw_time_labels(c, w, bottom)
@@ -663,7 +698,7 @@ class LocDock(tk.Tk):
                 c.create_rectangle(x0, y - red_h, x1, y, fill=RED, outline="")
 
     def _draw_cost_chart(self, c, w, h):
-        since = day_start()
+        since = self._range_start()
         buckets = bucket_cost_timeline(self._cost_points, since, datetime.now(TZ), N_BUCKETS)
         bottom = h - 18
         c.create_line(0, bottom, w, bottom, fill=AXIS_CLR, width=1)
@@ -693,7 +728,7 @@ class LocDock(tk.Tk):
             c.create_rectangle(x0, bottom - bh, x1, bottom, fill=ACCENT2, outline="")
 
     def _draw_token_chart(self, c, w, h):
-        since = day_start()
+        since = self._range_start()
         buckets = bucket_token_timeline(self._token_points, since, datetime.now(TZ), N_BUCKETS)
         bottom = h - 18
         c.create_line(0, bottom, w, bottom, fill=AXIS_CLR, width=1)
@@ -748,7 +783,7 @@ class LocDock(tk.Tk):
 
     def _load_data_bg(self):
         """Heavy I/O: git subprocesses, JSONL filesystem scan. Runs every 60s."""
-        since = day_start()
+        since = week_start()
 
         try:
             self._git_points = get_git_loc_timeline(REPOS_DIR, since)
@@ -790,13 +825,19 @@ class LocDock(tk.Tk):
         self._update_ui()
         self.after(REFRESH_DATA_MS, self._load_data)
 
+    def _range_start(self) -> datetime:
+        return week_start() if self._time_range == "week" else day_start()
+
     def _update_ui(self):
-        """Cheap: query cached DuckDB, rebucket, update labels. Runs every 30s."""
-        since = day_start()
+        since = self._range_start()
         now_local = datetime.now(TZ)
 
-        self._time_start_str = since.strftime("%H:%M")
-        self._time_end_str = now_local.strftime("%H:%M")
+        if self._time_range == "week":
+            self._time_start_str = since.strftime("%a %d")
+            self._time_end_str = now_local.strftime("%a %d")
+        else:
+            self._time_start_str = since.strftime("%H:%M")
+            self._time_end_str = now_local.strftime("%H:%M")
         self._time_start_dt = since
         self._time_end_dt = now_local
         self._draw_chart()

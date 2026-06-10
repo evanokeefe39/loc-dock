@@ -14,21 +14,42 @@ interface Settings {
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
-const TIMEZONES = [
-  "UTC",
-  "US/Eastern", "US/Central", "US/Mountain", "US/Pacific", "US/Alaska", "US/Hawaii",
-  "Canada/Eastern", "Canada/Central", "Canada/Mountain", "Canada/Pacific",
-  "Europe/London", "Europe/Dublin", "Europe/Berlin", "Europe/Paris", "Europe/Madrid",
-  "Europe/Rome", "Europe/Amsterdam", "Europe/Brussels", "Europe/Vienna",
-  "Europe/Zurich", "Europe/Stockholm", "Europe/Oslo", "Europe/Helsinki",
-  "Europe/Warsaw", "Europe/Prague", "Europe/Budapest", "Europe/Bucharest",
-  "Europe/Athens", "Europe/Istanbul", "Europe/Moscow", "Europe/Kiev",
-  "Asia/Dubai", "Asia/Kolkata", "Asia/Bangkok", "Asia/Singapore",
-  "Asia/Hong_Kong", "Asia/Shanghai", "Asia/Tokyo", "Asia/Seoul",
-  "Australia/Sydney", "Australia/Melbourne", "Australia/Perth",
-  "Pacific/Auckland", "Pacific/Fiji",
-  "America/Sao_Paulo", "America/Argentina/Buenos_Aires", "America/Mexico_City",
-  "Africa/Cairo", "Africa/Johannesburg", "Africa/Lagos",
+const TIMEZONES: [string, string][] = [
+  ["Pacific/Midway", "(GMT -11:00) Midway Island, Samoa"],
+  ["Pacific/Honolulu", "(GMT -10:00) Hawaii"],
+  ["America/Anchorage", "(GMT -9:00) Alaska"],
+  ["America/Los_Angeles", "(GMT -8:00) Pacific Time (US & Canada)"],
+  ["America/Denver", "(GMT -7:00) Mountain Time (US & Canada)"],
+  ["America/Chicago", "(GMT -6:00) Central Time (US & Canada)"],
+  ["America/Mexico_City", "(GMT -6:00) Mexico City"],
+  ["America/New_York", "(GMT -5:00) Eastern Time (US & Canada)"],
+  ["America/Bogota", "(GMT -5:00) Bogota, Lima"],
+  ["America/Caracas", "(GMT -4:30) Caracas"],
+  ["America/Halifax", "(GMT -4:00) Atlantic Time (Canada)"],
+  ["America/St_Johns", "(GMT -3:30) Newfoundland"],
+  ["America/Sao_Paulo", "(GMT -3:00) Brazil, Buenos Aires"],
+  ["Atlantic/Azores", "(GMT -1:00) Azores"],
+  ["UTC", "(GMT) UTC"],
+  ["Europe/London", "(GMT +0:00) London, Lisbon, Casablanca"],
+  ["Europe/Berlin", "(GMT +1:00) Brussels, Berlin, Madrid, Paris"],
+  ["Europe/Helsinki", "(GMT +2:00) Helsinki, Kyiv, Bucharest, Athens"],
+  ["Africa/Johannesburg", "(GMT +2:00) South Africa"],
+  ["Europe/Istanbul", "(GMT +3:00) Istanbul"],
+  ["Europe/Moscow", "(GMT +3:00) Moscow, St. Petersburg"],
+  ["Asia/Tehran", "(GMT +3:30) Tehran"],
+  ["Asia/Dubai", "(GMT +4:00) Abu Dhabi, Dubai, Tbilisi"],
+  ["Asia/Kabul", "(GMT +4:30) Kabul"],
+  ["Asia/Karachi", "(GMT +5:00) Islamabad, Karachi"],
+  ["Asia/Kolkata", "(GMT +5:30) Mumbai, New Delhi"],
+  ["Asia/Kathmandu", "(GMT +5:45) Kathmandu"],
+  ["Asia/Dhaka", "(GMT +6:00) Dhaka, Almaty"],
+  ["Asia/Bangkok", "(GMT +7:00) Bangkok, Hanoi, Jakarta"],
+  ["Asia/Shanghai", "(GMT +8:00) Beijing, Singapore, Hong Kong"],
+  ["Australia/Perth", "(GMT +8:00) Perth"],
+  ["Asia/Tokyo", "(GMT +9:00) Tokyo, Seoul, Osaka"],
+  ["Australia/Adelaide", "(GMT +9:30) Adelaide, Darwin"],
+  ["Australia/Sydney", "(GMT +10:00) Sydney, Melbourne, Guam"],
+  ["Pacific/Auckland", "(GMT +12:00) Auckland, Wellington, Fiji"],
 ];
 
 interface Props {
@@ -112,11 +133,11 @@ export function SettingsPanel({ visible, onClose }: Props) {
         <label>
           <span>Timezone</span>
           <select value={settings.timezone} onChange={e => update("timezone", e.target.value)}>
-            {!TIMEZONES.includes(settings.timezone) && (
+            {!TIMEZONES.some(([val]) => val === settings.timezone) && (
               <option value={settings.timezone}>{settings.timezone}</option>
             )}
-            {TIMEZONES.map(tz => (
-              <option key={tz} value={tz}>{tz}</option>
+            {TIMEZONES.map(([val, label]) => (
+              <option key={val} value={val}>{label}</option>
             ))}
           </select>
         </label>

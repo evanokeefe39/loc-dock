@@ -220,7 +220,7 @@ html, body {
   padding: 1px 8px;
   cursor: pointer;
 }
-.settings-close:hover { background: var(--cost); color: var(--bg); border-color: var(--cost); }
+.settings-close:hover { background: var(--text-dim); color: var(--bg); }
 
 .settings-save-btn {
   background: none;

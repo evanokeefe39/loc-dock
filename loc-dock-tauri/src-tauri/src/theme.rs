@@ -107,7 +107,7 @@ impl Theme {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let content = r#"# LOC Dock Theme
+        let content = r##"# LOC Dock Theme
 # Edit colors below. All values are hex (#RRGGBB).
 
 alpha: 0.92              # 0.0 = invisible, 1.0 = opaque
@@ -128,7 +128,7 @@ tok_input: "#e0e0e0"     # input tokens
 tok_output: "#f472b6"    # output tokens
 tok_cache_write: "#facc15"  # cache write tokens
 tok_cache_read: "#38bdf8"   # cache read tokens
-"#;
+"##;
         match std::fs::write(path, content) {
             Ok(_) => log::info!("Created default theme at {}", path.display()),
             Err(e) => warn!("Failed to create default theme: {}", e),

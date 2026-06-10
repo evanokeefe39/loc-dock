@@ -24,6 +24,16 @@ html, body {
   -webkit-app-region: drag;
   background: var(--bg-alpha, var(--bg));
   border-radius: 4px;
+  container-type: size;
+  container-name: dock;
+}
+
+@container dock (max-height: 100px) {
+  .chart { display: none; }
+}
+
+@container dock (max-height: 55px) {
+  .chart, .bottom-row { display: none; }
 }
 
 /* ── Top Row ── */

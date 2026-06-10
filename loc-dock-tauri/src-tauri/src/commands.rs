@@ -24,6 +24,8 @@ pub struct SettingsData {
     pub timezone: String,
     pub day_start_hour: u32,
     pub week_start_day: u32,
+    pub config_dir: String,
+    pub theme_path: String,
 }
 
 #[tauri::command]
@@ -35,6 +37,8 @@ pub fn get_settings(app: AppHandle) -> SettingsData {
         timezone: config.timezone.clone(),
         day_start_hour: config.day_start_hour,
         week_start_day: config.week_start_day,
+        config_dir: config.config_dir.to_string_lossy().to_string(),
+        theme_path: config.config_dir.join("theme.yaml").to_string_lossy().to_string(),
     }
 }
 

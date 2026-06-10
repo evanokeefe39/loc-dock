@@ -7,6 +7,8 @@ interface Settings {
   timezone: string;
   day_start_hour: number;
   week_start_day: number;
+  config_dir: string;
+  theme_path: string;
 }
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
@@ -85,6 +87,18 @@ export function SettingsPanel({ visible, onClose }: Props) {
               <option key={i} value={i}>{d}</option>
             ))}
           </select>
+        </label>
+
+        <div className="settings-divider" />
+
+        <label>
+          <span>Theme file</span>
+          <span className="settings-path">{settings.theme_path}</span>
+        </label>
+
+        <label>
+          <span>Config dir</span>
+          <span className="settings-path">{settings.config_dir}</span>
         </label>
 
         <div className="settings-footer">

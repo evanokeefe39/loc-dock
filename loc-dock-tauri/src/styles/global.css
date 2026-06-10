@@ -69,7 +69,7 @@ html, body {
   background: var(--chart-bg);
   color: var(--text-dim);
   border: 1px solid var(--text-dim);
-  font-size: var(--font-sm);
+  font-size: var(--font-xs);
   padding: 1px 6px;
   cursor: pointer;
   font-family: inherit;
@@ -146,12 +146,12 @@ html, body {
 
 .stat-label {
   color: var(--text-dim);
-  margin-left: 6px;
+  margin-left: 12px;
 }
 .stat-label:first-child { margin-left: 0; }
 
 .stat-value {
-  margin-left: 2px;
+  margin-left: 4px;
 }
 
 .tok-input { color: var(--tok-input); }
@@ -239,6 +239,23 @@ html, body {
 
 .settings-panel select {
   max-width: 120px;
+}
+
+.settings-path {
+  color: var(--text-dim);
+  font-size: var(--font-xs);
+  font-family: Consolas, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+  text-align: right;
+}
+
+.settings-divider {
+  height: 1px;
+  background: var(--text-dim);
+  opacity: 0.3;
+  margin: 2px 0;
 }
 
 .settings-footer {

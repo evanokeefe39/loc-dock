@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["duckdb", "tzdata", "pyyaml"]
+# dependencies = ["duckdb", "tzdata", "pyyaml", "Pillow"]
 # ///
 """
 LOC Dock — floating desktop widget for daily dev metrics.
@@ -8,6 +8,8 @@ LOC Dock — floating desktop widget for daily dev metrics.
 Run:  uv run dock.py
 """
 
+import base64
+import io
 import logging
 import os
 import re
@@ -21,6 +23,23 @@ from zoneinfo import ZoneInfo
 
 import duckdb
 import yaml
+from PIL import Image, ImageTk
+
+# ── Icons (Lucide-style, 14x14 PNG, base64) ─────────────────────────
+_ICON_DATA = {
+    "pin": "iVBORw0KGgoAAAANSUhEUgAAAA4AAAAOCAYAAAAfSC3RAAACEklEQVR4nI1STWgTQRR+b2Ynm5imyaaiBgVvpSoeFHoUvBT04EXZePdQJFFsYqsIKZtYKFYs0YMUDx48eDCrKAqCkKPn4kFzMXj0IqlJNrvJbndmZJJGrB7sd3nDe++b970fhN1AAJD5wt2TlJGLBIgmQXx8dL/04c/4+DGEZVmk0WjggcPH1yhj1ycSiYgKD/oeBNvBu4jgV9bXyy0cMlASZUyzRiuVith/5NitZHrqJue83/m5ZW21fhR8v/8llUpf8Lh8jojSsso7VCkRESG3aB2kQD9rGmNh4J4VUjtHGZv2t91ShMbe6rp+2nXduY2HlboqpGWztqrKQYgT8UljqttuvUBKZ5NJY1X9zNshDXn4NLUvfcpzvTMAUDeMOtHGPQoBgRAcANFAhG9e33UIkgSA2ASUhlImiQjG+aRWM4VyxunkpttzvkZj8TnO5VF/MHgWBP57QN5klF1znA5HId4oUiaT4cNGlWbbzvJ8YflSNDbxEgmBvtfjEiDU9aiu6zHodFrVjepK0TRNats2H05VkdQ6HldXXvU953IQ+E1CNCRI9DAM206vXVIklWPbtvhr9wDz80+YsldvLJ9fuL0qi3fuiXzRerCz59/z2HUAI0i0rDLtdieZD84nFmHTIPjM99mZJtgjZf9UG0P1q2y+YC3kCuXXI5859P0HcqhiaWktkVu0Do2PZA/EveEXR5DrrTjn4sAAAAAASUVORK5CYII=",
+    "x": "iVBORw0KGgoAAAANSUhEUgAAAA4AAAAOCAYAAAAfSC3RAAACAUlEQVR4nH1SMWzTQBT9ZzsNCck5renAUJjpwIREYaFCCChlYcnOUhTD0iJEJZDuTiBBp6pdogoVBAMrC7AgwQrqBgpCRerEAGma2E4cJ45zh35ioxQVvnS6u6//7r//7gGMBGPMUEqR0VwSjDENF/w39oNJvPaFMaxTpFgsakePn7zjh+1nm4T8wteF4IoxToQQ8taSeKoAvlZnTqxOVyoK2xuEEDU5NX23MHHkUSaVeVUqLY9jMWNcx91e5OW8WbgOoO4f+1SxBjSwG+ec7LaiKQ3GXuapedbz3I85I315ZWXZtW/zjXyOLgS+v9sLw/ny+oMtZBNzx5mIwk56NvPWHLdmGnvV94qo7ya1brT95l7QDeeexCBkEatEFCbK5ceNQMp5z6m/S6cz5w+NZRG00+kFFxF0jjEDQYj4I+9QCGZsroq6lP2dAQ9Q0JeyBu3aN7zPAshRqYe7UgCEKHuRb1CzsOC5zg8A+dMsWKeabmOrH3QuIaOE6gAYf6xWdWGdmmYpCNo12ZMXUnB4O9L9D7k8PY2CtaL63PO1NQcFJUhPCBHdXOL3JqzJh65Trwbd8CrOhI8OBcu+odQ843mNLympZikFR+Oc97FAgv6i6Tmve53oWqyekQimR/0rnud+BgXbmtbq/tNxo55MzrZt5/6yYWJPNTDDQUY+yPi/Ae2VFELgLo1QAAAAAElFTkSuQmCC",
+    "info": "iVBORw0KGgoAAAANSUhEUgAAAA4AAAAOCAYAAAAfSC3RAAACMUlEQVR4nGVSPWhTURQ+59z73ktimoSaOuhiN81QwcmtLk5StyCCYy1acLFoHQr3PXGzIFZCJ5EuBasudXE0qzhKUIpuCjalpvYnybs/R+6L0arfci/nnu+755zvIPwBAgD7y81b96ZBwGXnuCSFWO98azdWVh51mBkRkYfJPh+ZAeI4DrZ28UUU5aasswDMIGQA1uiWc3zp8eLCZ6ViTJLEkaetrT0nr7S1i7ePFEtT/X5X61Q7rY3rdffTMIxq1pplTzpcnhfG+LwS7bPwQcpw3Jg+IFIm+guWSACm/dNLS/c3lGKien1NIAK3z7jJIIjGjdH/koAZOAhDYUheHURios3NBvoeUYo5ITzBmeGQhkBk1mnKRHh9Zn6+nCSJpWazaeZn7paA+ZzWKUS5fJiNjv24BgijXMDsUATyWOgKE144K6mXzyEj5hxzR/f6iwCYEglfiQ7CEPrd3lPn7LswjAANSM+her0uKhXYQ+b3hUKxaNiuM9lxQNyojI4FWpsrY+VkWsrgZK/X7TrpPmbEWq3mfTHA3CAiKWXwUjBUrTWrVutX1vKX9o/49UipUjVaP2s8SL5OTiqZ2aGUolarhdUTp5bLlaPXDg72wGjzhsHtENKFcmW0sLPz/W3E7uLICGzHccxDQ30//uDZuWRBIt3I5fPHvXf7B7tdAlrdM/rOk4fJtnfA5/3ehAEGwdlZVRRFOSEECW3ST7687PXQrv4HpVQ2tcPwSwL89yc/ARIXDQzVnYkmAAAAAElFTkSuQmCC",
+}
+
+def _load_icon(name: str) -> ImageTk.PhotoImage | None:
+    try:
+        data = base64.b64decode(_ICON_DATA[name])
+        img = Image.open(io.BytesIO(data))
+        return ImageTk.PhotoImage(img)
+    except Exception as exc:
+        log.warning("Failed to load icon %s: %s", name, exc)
+        return None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -482,6 +501,7 @@ class LocDock(tk.Tk):
         self.attributes("-alpha", ALPHA)
         self.configure(bg=BG)
 
+        self._icons = {k: _load_icon(k) for k in _ICON_DATA}
         self.store = UsageStore(PROJECTS_DIR)
         self._git_points: list = []
         self._cost_points: list[tuple[datetime, float]] = []
@@ -529,10 +549,11 @@ class LocDock(tk.Tk):
         )
         self.lbl_cost.pack(side="left")
 
-        self.lbl_info = tk.Label(
-            top, text="i", bg=BG, fg=TEXT_DIM,
-            font=("Segoe UI", 7, "italic"), cursor="hand2",
-        )
+        self.lbl_info = tk.Label(top, bg=BG, cursor="hand2")
+        if self._icons["info"]:
+            self.lbl_info.config(image=self._icons["info"])
+        else:
+            self.lbl_info.config(text="i", fg=TEXT_DIM, font=("Segoe UI", 7, "italic"))
         self.lbl_info.pack(side="left", padx=(2, 0))
         self.lbl_info.bind("<Enter>", self._show_tooltip)
         self.lbl_info.bind("<Leave>", self._hide_tooltip)
@@ -554,19 +575,18 @@ class LocDock(tk.Tk):
         )
         self.lbl_sess_today.pack(side="left", padx=(1, 0))
 
-        close_btn = tk.Label(
-            top, text="x", bg=BG, fg=TEXT_DIM,
-            font=("Segoe UI", 8), cursor="hand2",
-        )
+        close_btn = tk.Label(top, bg=BG, cursor="hand2")
+        if self._icons["x"]:
+            close_btn.config(image=self._icons["x"])
+        else:
+            close_btn.config(text="x", fg=TEXT_DIM, font=("Segoe UI", 8))
         close_btn.pack(side="right")
         close_btn.bind("<Button-1>", lambda e: self.destroy())
 
-        self.btn_pin = tk.Label(
-            top, text="", bg=BG, fg=TEXT_DIM,
-            font=("Segoe UI", 7), cursor="hand2",
-        )
+        self.btn_pin = tk.Label(top, bg=BG, cursor="hand2")
         self.btn_pin.pack(side="right", padx=(0, 2))
         self.btn_pin.bind("<Button-1>", self._click_pin)
+        self.btn_pin.pack_forget()
 
         btn_font = ("Segoe UI", 7)
         btn_kw = dict(bg=CHART_BG, fg=TEXT_DIM, font=btn_font, cursor="hand2",
@@ -686,7 +706,11 @@ class LocDock(tk.Tk):
     def _on_drag(self, event):
         if self._pinned:
             self._pinned = False
-            self.btn_pin.config(text="\U0001F4CC")
+            if self._icons["pin"]:
+                self.btn_pin.config(image=self._icons["pin"])
+            else:
+                self.btn_pin.config(text="\U0001F4CC")
+            self.btn_pin.pack(side="right", padx=(0, 2))
         self.geometry(
             f"+{self.winfo_x() + event.x - self._drag_x}"
             f"+{self.winfo_y() + event.y - self._drag_y}"
@@ -694,7 +718,7 @@ class LocDock(tk.Tk):
 
     def _click_pin(self, event=None):
         self._pinned = True
-        self.btn_pin.config(text="")
+        self.btn_pin.pack_forget()
         self._snap_to_corner()
 
     def _draw_chart(self):

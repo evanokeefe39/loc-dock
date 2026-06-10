@@ -596,23 +596,16 @@ class LocDock(tk.Tk):
         self.lbl_cache_r = self._inline_stat(bot, "CR", TOK_CACHE_READ)
         self.lbl_total = self._inline_stat(bot, "TOT")
 
-        # ── Drag ──
+        # ── Drag (unpins from corner) ──
         self._drag_x = 0
         self._drag_y = 0
+        self._pinned = True
         for w in [self, root, top]:
             w.bind("<Button-1>", self._start_drag)
             w.bind("<B1-Motion>", self._on_drag)
 
         # ── Position bottom-right, above taskbar ──
-        self.update_idletasks()
-        sw = self.winfo_screenwidth()
-        sh = self.winfo_screenheight()
-        w = self.winfo_reqwidth()
-        h = self.winfo_reqheight()
-        taskbar_h = sh - self.winfo_vrootheight()
-        if taskbar_h < 20:
-            taskbar_h = 48
-        self.geometry(f"+{sw - w}+{sh - h - taskbar_h}")
+        self._snap_to_corner()
 
         self.after(100, self._load_data)
 
@@ -668,11 +661,23 @@ class LocDock(tk.Tk):
             self._tooltip.destroy()
             self._tooltip = None
 
+    def _snap_to_corner(self):
+        self.update_idletasks()
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        w = self.winfo_reqwidth()
+        h = self.winfo_reqheight()
+        taskbar_h = sh - self.winfo_vrootheight()
+        if taskbar_h < 20:
+            taskbar_h = 48
+        self.geometry(f"+{sw - w}+{sh - h - taskbar_h}")
+
     def _start_drag(self, event):
         self._drag_x = event.x
         self._drag_y = event.y
 
     def _on_drag(self, event):
+        self._pinned = False
         self.geometry(
             f"+{self.winfo_x() + event.x - self._drag_x}"
             f"+{self.winfo_y() + event.y - self._drag_y}"
@@ -950,6 +955,9 @@ class LocDock(tk.Tk):
 
         self.lbl_sess_active.config(text=str(self._sess_active))
         self.lbl_sess_today.config(text=str(self._sess_today))
+
+        if self._pinned:
+            self._snap_to_corner()
 
         self.after(REFRESH_UI_MS, self._update_ui)
 

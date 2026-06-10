@@ -32,6 +32,7 @@ pub fn run() {
             commands::get_stats,
             commands::get_settings,
             commands::save_settings,
+            commands::restart_app,
             commands::snap_to_corner,
         ])
         .setup(move |app| {

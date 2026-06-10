@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Save } from "lucide-react";
 
 interface Settings {
@@ -22,6 +23,7 @@ export function SettingsPanel({ visible, onClose }: Props) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
+  const [saved, setSaved] = useState(false);
   const original = useRef<string>("");
 
   useEffect(() => {
@@ -30,6 +32,7 @@ export function SettingsPanel({ visible, onClose }: Props) {
         setSettings(s);
         original.current = JSON.stringify(s);
         setDirty(false);
+        setSaved(false);
       }).catch(console.error);
     }
   }, [visible]);
@@ -40,6 +43,7 @@ export function SettingsPanel({ visible, onClose }: Props) {
     const updated = { ...settings, [field]: value };
     setSettings(updated);
     setDirty(JSON.stringify(updated) !== original.current);
+    setSaved(false);
   };
 
   const handleSave = async () => {
@@ -48,6 +52,7 @@ export function SettingsPanel({ visible, onClose }: Props) {
       await invoke("save_settings", { settings });
       original.current = JSON.stringify(settings);
       setDirty(false);
+      setSaved(true);
     } catch (e) {
       console.error("Save failed:", e);
     }
@@ -110,7 +115,13 @@ export function SettingsPanel({ visible, onClose }: Props) {
           </select>
         </label>
 
-        <span className="settings-hint">Restart to apply changes</span>
+        {saved && (
+          <button className="settings-restart" onClick={() => {
+            invoke("restart_app").catch(() => getCurrentWindow().close());
+          }}>
+            Restart to apply changes
+          </button>
+        )}
       </div>
     </div>
   );

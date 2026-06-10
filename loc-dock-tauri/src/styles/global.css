@@ -266,10 +266,19 @@ html, body {
   margin: 2px 0;
 }
 
-.settings-hint {
-  color: var(--text-dim);
-  font-size: var(--font-xs);
+.settings-restart {
+  background: none;
+  border: 1px solid var(--cost);
+  color: var(--cost);
+  font-family: inherit;
+  font-size: var(--font-sm);
+  padding: 3px 10px;
+  cursor: pointer;
+  margin-top: 4px;
+  width: 100%;
+  -webkit-app-region: no-drag;
 }
+.settings-restart:hover { background: var(--cost); color: var(--bg); }
 
 /* ── Tooltip ── */
 .cost-tooltip {

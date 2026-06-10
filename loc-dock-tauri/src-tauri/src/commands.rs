@@ -55,6 +55,11 @@ pub fn save_settings(app: AppHandle, settings: SettingsData) -> Result<(), Strin
 }
 
 #[tauri::command]
+pub fn restart_app(app: AppHandle) {
+    app.restart();
+}
+
+#[tauri::command]
 pub async fn snap_to_corner(window: Window, corner: String) -> Result<(), String> {
     if let Some(monitor) = window.current_monitor().map_err(|e| e.to_string())? {
         let monitor_size = monitor.size();

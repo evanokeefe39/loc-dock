@@ -1,0 +1,107 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", sans-serif;
+  font-size: 11px;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.app {
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.top-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 18px;
+}
+
+.loc-add { color: var(--loc-add); font-weight: bold; }
+.loc-del { color: var(--loc-del); font-weight: bold; margin-left: 4px; }
+.cost { color: var(--cost); font-weight: bold; }
+.sessions-label { color: var(--text-dim); font-size: 10px; }
+.sessions-active { color: var(--sessions); font-weight: bold; font-size: 10px; margin-left: 2px; }
+.sessions-sep { color: var(--text-dim); font-size: 10px; margin: 0 1px; }
+.sessions-total { color: var(--text); font-size: 10px; }
+
+.sep {
+  width: 1px;
+  height: 12px;
+  background: var(--text-dim);
+  margin: 0 6px;
+  flex-shrink: 0;
+}
+
+.spacer { flex: 1; }
+
+.info-icon {
+  color: var(--text-dim);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  margin-left: 2px;
+}
+
+.toggle-btn {
+  background: var(--chart-bg);
+  color: var(--text-dim);
+  border: 1px solid var(--text-dim);
+  font-size: 10px;
+  padding: 0 6px;
+  cursor: pointer;
+  font-family: inherit;
+  margin-left: 4px;
+}
+.toggle-btn:hover { color: var(--text); }
+
+.icon-btn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  padding: 0 1px;
+}
+.icon-btn:hover { color: var(--text); }
+
+.chart {
+  width: 100%;
+  flex: 1;
+  margin-top: 2px;
+}
+
+.bottom-row {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  height: 16px;
+  margin-top: 2px;
+}
+
+.stat-label { color: var(--text-dim); font-size: 10px; margin-left: 3px; }
+.stat-value { font-size: 10px; margin-left: 1px; }
+.tok-input { color: var(--tok-input); }
+.tok-output { color: var(--tok-output); }
+.tok-cache-write { color: var(--tok-cache-write); }
+.tok-cache-read { color: var(--tok-cache-read); }
+
+.cost-tooltip {
+  position: fixed;
+  background: var(--tooltip-bg);
+  color: var(--text);
+  padding: 6px;
+  font-family: Consolas, monospace;
+  font-size: 11px;
+  z-index: 1000;
+  pointer-events: none;
+}
+.cost-tooltip pre { margin: 0; }

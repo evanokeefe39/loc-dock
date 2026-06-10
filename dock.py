@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["duckdb", "tzdata"]
+# dependencies = ["duckdb", "tzdata", "pyyaml"]
 # ///
 """
 LOC Dock — floating desktop widget for daily dev metrics.
@@ -18,6 +18,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import duckdb
+import yaml
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,19 +44,44 @@ PRICING = {
     "cache_read":    1.50,
 }
 
-# ── Colours ──────────────────────────────────────────────────────────
-BG       = "#1a1a2e"
-FG       = "#e0e0e0"
-ACCENT2  = "#a78bfa"
-DIM      = "#6b7280"
-GREEN    = "#34d399"
-RED      = "#ef4444"
-ORANGE   = "#f97316"
-PINK     = "#f472b6"
-YELLOW   = "#facc15"
-BLUE     = "#38bdf8"
-CHART_BG = "#12121f"
-AXIS_CLR = "#333350"
+# ── Theme ────────────────────────────────────────────────────────────
+_THEME_PATH = Path(__file__).parent / "theme.yaml"
+_THEME_DEFAULTS = {
+    "alpha": 0.92,
+    "bg": "#1a1a2e", "chart_bg": "#12121f", "tooltip_bg": "#222244",
+    "text": "#e0e0e0", "text_dim": "#6b7280", "axis": "#333350",
+    "loc_add": "#34d399", "loc_del": "#ef4444",
+    "cost": "#a78bfa", "sessions": "#f97316",
+    "tok_input": "#e0e0e0", "tok_output": "#f472b6",
+    "tok_cache_write": "#facc15", "tok_cache_read": "#38bdf8",
+}
+
+def _load_theme() -> dict:
+    theme = dict(_THEME_DEFAULTS)
+    if _THEME_PATH.exists():
+        try:
+            with open(_THEME_PATH, encoding="utf-8") as f:
+                theme.update(yaml.safe_load(f) or {})
+        except (yaml.YAMLError, OSError) as exc:
+            log.warning("Bad theme.yaml, using defaults: %s", exc)
+    return theme
+
+_T = _load_theme()
+ALPHA          = _T["alpha"]
+BG             = _T["bg"]
+CHART_BG       = _T["chart_bg"]
+TOOLTIP_BG     = _T["tooltip_bg"]
+TEXT           = _T["text"]
+TEXT_DIM       = _T["text_dim"]
+AXIS_CLR       = _T["axis"]
+LOC_ADD        = _T["loc_add"]
+LOC_DEL        = _T["loc_del"]
+COST_CLR       = _T["cost"]
+SESSIONS_CLR   = _T["sessions"]
+TOK_INPUT      = _T["tok_input"]
+TOK_OUTPUT     = _T["tok_output"]
+TOK_CACHE_WRITE = _T["tok_cache_write"]
+TOK_CACHE_READ = _T["tok_cache_read"]
 
 
 # ── Git LOC with timestamps ─────────────────────────────────────────
@@ -401,7 +427,7 @@ class LocDock(tk.Tk):
         self.title("LOC Dock")
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.attributes("-alpha", 0.92)
+        self.attributes("-alpha", ALPHA)
         self.configure(bg=BG)
 
         self.store = UsageStore(PROJECTS_DIR)
@@ -432,60 +458,60 @@ class LocDock(tk.Tk):
         top.pack(fill="x")
 
         self.lbl_added = tk.Label(
-            top, text="+0", bg=BG, fg=GREEN, font=("Segoe UI", 8, "bold"),
+            top, text="+0", bg=BG, fg=LOC_ADD, font=("Segoe UI", 8, "bold"),
         )
         self.lbl_added.pack(side="left")
         self.lbl_deleted = tk.Label(
-            top, text="-0", bg=BG, fg=RED, font=("Segoe UI", 8, "bold"),
+            top, text="-0", bg=BG, fg=LOC_DEL, font=("Segoe UI", 8, "bold"),
         )
         self.lbl_deleted.pack(side="left", padx=(4, 0))
 
-        tk.Frame(top, bg=DIM, width=1, height=12).pack(side="left", padx=6)
+        tk.Frame(top, bg=TEXT_DIM, width=1, height=12).pack(side="left", padx=6)
 
         self.lbl_cost = tk.Label(
-            top, text="$0", bg=BG, fg=ACCENT2, font=("Segoe UI", 8, "bold"),
+            top, text="$0", bg=BG, fg=COST_CLR, font=("Segoe UI", 8, "bold"),
         )
         self.lbl_cost.pack(side="left")
 
         self.lbl_info = tk.Label(
-            top, text="i", bg=BG, fg=DIM,
+            top, text="i", bg=BG, fg=TEXT_DIM,
             font=("Segoe UI", 7, "italic"), cursor="hand2",
         )
         self.lbl_info.pack(side="left", padx=(2, 0))
         self.lbl_info.bind("<Enter>", self._show_tooltip)
         self.lbl_info.bind("<Leave>", self._hide_tooltip)
 
-        tk.Frame(top, bg=DIM, width=1, height=12).pack(side="left", padx=6)
+        tk.Frame(top, bg=TEXT_DIM, width=1, height=12).pack(side="left", padx=6)
 
         tk.Label(
-            top, text="S:", bg=BG, fg=DIM, font=("Segoe UI", 7),
+            top, text="S:", bg=BG, fg=TEXT_DIM, font=("Segoe UI", 7),
         ).pack(side="left")
         self.lbl_sess_active = tk.Label(
-            top, text="0", bg=BG, fg=ORANGE, font=("Segoe UI", 7, "bold"),
+            top, text="0", bg=BG, fg=SESSIONS_CLR, font=("Segoe UI", 7, "bold"),
         )
         self.lbl_sess_active.pack(side="left", padx=(2, 0))
         tk.Label(
-            top, text="/", bg=BG, fg=DIM, font=("Segoe UI", 7),
+            top, text="/", bg=BG, fg=TEXT_DIM, font=("Segoe UI", 7),
         ).pack(side="left", padx=(1, 0))
         self.lbl_sess_today = tk.Label(
-            top, text="0", bg=BG, fg=FG, font=("Segoe UI", 7),
+            top, text="0", bg=BG, fg=TEXT, font=("Segoe UI", 7),
         )
         self.lbl_sess_today.pack(side="left", padx=(1, 0))
 
         close_btn = tk.Label(
-            top, text="x", bg=BG, fg=DIM,
+            top, text="x", bg=BG, fg=TEXT_DIM,
             font=("Segoe UI", 8), cursor="hand2",
         )
         close_btn.pack(side="right")
         close_btn.bind("<Button-1>", lambda e: self.destroy())
 
         self.lbl_spinner = tk.Label(
-            top, text="", bg=BG, fg=DIM, font=("Segoe UI", 7),
+            top, text="", bg=BG, fg=TEXT_DIM, font=("Segoe UI", 7),
         )
         self.lbl_spinner.pack(side="right", padx=(0, 3))
 
         btn_font = ("Segoe UI", 7)
-        btn_kw = dict(bg=CHART_BG, fg=DIM, font=btn_font, cursor="hand2",
+        btn_kw = dict(bg=CHART_BG, fg=TEXT_DIM, font=btn_font, cursor="hand2",
                       bd=1, relief="solid", padx=6, pady=0)
         self.btn_mode = tk.Label(top, text="LOC", **btn_kw)
         self.btn_mode.pack(side="right", padx=(0, 4))
@@ -493,7 +519,7 @@ class LocDock(tk.Tk):
         self.btn_range = tk.Label(top, text="DAY", **btn_kw)
         self.btn_range.pack(side="right", padx=(0, 4))
         self.btn_range.bind("<Button-1>", self._click_range)
-        tk.Frame(top, bg=DIM, width=1, height=12).pack(side="right", padx=6)
+        tk.Frame(top, bg=TEXT_DIM, width=1, height=12).pack(side="right", padx=6)
 
         # ── Chart ──
         self.chart = tk.Canvas(
@@ -508,10 +534,10 @@ class LocDock(tk.Tk):
         bot = tk.Frame(root, bg=BG)
         bot.pack(fill="x", pady=(2, 0))
 
-        self.lbl_input = self._inline_stat(bot, "IN", FG)
-        self.lbl_output = self._inline_stat(bot, "OUT", PINK)
-        self.lbl_cache_w = self._inline_stat(bot, "CW", YELLOW)
-        self.lbl_cache_r = self._inline_stat(bot, "CR", BLUE)
+        self.lbl_input = self._inline_stat(bot, "IN", TOK_INPUT)
+        self.lbl_output = self._inline_stat(bot, "OUT", TOK_OUTPUT)
+        self.lbl_cache_w = self._inline_stat(bot, "CW", TOK_CACHE_WRITE)
+        self.lbl_cache_r = self._inline_stat(bot, "CR", TOK_CACHE_READ)
         self.lbl_total = self._inline_stat(bot, "TOT")
 
         # ── Drag ──
@@ -534,9 +560,9 @@ class LocDock(tk.Tk):
 
         self.after(100, self._load_data)
 
-    def _inline_stat(self, parent, label, color=FG):
+    def _inline_stat(self, parent, label, color=TEXT):
         tk.Label(
-            parent, text=label, bg=BG, fg=DIM, font=("Segoe UI", 7),
+            parent, text=label, bg=BG, fg=TEXT_DIM, font=("Segoe UI", 7),
         ).pack(side="left", padx=(3, 0))
         val = tk.Label(
             parent, text="--", bg=BG, fg=color, font=("Segoe UI", 7),
@@ -570,9 +596,9 @@ class LocDock(tk.Tk):
         tw = tk.Toplevel(self)
         tw.overrideredirect(True)
         tw.attributes("-topmost", True)
-        tw.configure(bg="#222244")
+        tw.configure(bg=TOOLTIP_BG)
         lbl = tk.Label(
-            tw, text=text, bg="#222244", fg=FG,
+            tw, text=text, bg=TOOLTIP_BG, fg=TEXT,
             font=("Consolas", 8), justify="left", padx=6, pady=4,
         )
         lbl.pack()
@@ -609,7 +635,7 @@ class LocDock(tk.Tk):
             frame = self._spinner_frames[self._spinner_idx]
             c.create_text(
                 w // 2, h // 2, text=f"{frame} loading…",
-                fill=DIM, font=("Segoe UI", 8),
+                fill=TEXT_DIM, font=("Segoe UI", 8),
             )
             return
 
@@ -629,7 +655,7 @@ class LocDock(tk.Tk):
         font = ("Segoe UI", 7)
         tick_h = 3
         c.create_text(4, axis_y + 2, text=self._time_start_str,
-                       fill=DIM, font=font, anchor="nw")
+                       fill=TEXT_DIM, font=font, anchor="nw")
         if self._time_range == "week":
             t = (since + timedelta(days=1)).replace(hour=DAY_START_HOUR, minute=0, second=0, microsecond=0)
             while t < now:
@@ -638,7 +664,7 @@ class LocDock(tk.Tk):
                 if x > TIME_PAD + 12:
                     c.create_line(x, axis_y, x, axis_y + tick_h, fill=AXIS_CLR)
                     c.create_text(x, axis_y + 3, text=t.strftime("%a"),
-                                  fill=DIM, font=font, anchor="n")
+                                  fill=TEXT_DIM, font=font, anchor="n")
                 t += timedelta(days=1)
         else:
             first_tick = since.replace(minute=0, second=0, microsecond=0)
@@ -651,13 +677,13 @@ class LocDock(tk.Tk):
                 if x > TIME_PAD + 12:
                     c.create_line(x, axis_y, x, axis_y + tick_h, fill=AXIS_CLR)
                     c.create_text(x, axis_y + 3, text=t.strftime("%H"),
-                                  fill=DIM, font=font, anchor="n")
+                                  fill=TEXT_DIM, font=font, anchor="n")
                 t += timedelta(hours=3)
 
     def _draw_chrome(self, c, w, y_max_str: str):
         if y_max_str:
             c.create_text(3, 2, text=y_max_str,
-                          fill=DIM, font=("Segoe UI", 6), anchor="nw")
+                          fill=TEXT_DIM, font=("Segoe UI", 6), anchor="nw")
 
     def _draw_loc_chart(self, c, w, h):
         buckets = bucket_timeline(self._git_points, self._range_start(), datetime.now(TZ), N_BUCKETS)
@@ -668,7 +694,7 @@ class LocDock(tk.Tk):
         if not buckets or all(a == 0 and d == 0 for a, d in buckets):
             self._draw_chrome(c, w, "")
             c.create_text(w // 2, h // 2, text="no commits yet",
-                          fill=DIM, font=("Segoe UI", 8))
+                          fill=TEXT_DIM, font=("Segoe UI", 8))
             return
 
         bar_left = TIME_PAD
@@ -692,10 +718,10 @@ class LocDock(tk.Tk):
             red_h = total_h - green_h
             y = bottom
             if green_h > 0:
-                c.create_rectangle(x0, y - green_h, x1, y, fill=GREEN, outline="")
+                c.create_rectangle(x0, y - green_h, x1, y, fill=LOC_ADD, outline="")
                 y -= green_h
             if red_h > 0:
-                c.create_rectangle(x0, y - red_h, x1, y, fill=RED, outline="")
+                c.create_rectangle(x0, y - red_h, x1, y, fill=LOC_DEL, outline="")
 
     def _draw_cost_chart(self, c, w, h):
         since = self._range_start()
@@ -707,7 +733,7 @@ class LocDock(tk.Tk):
         if not buckets or all(v == 0 for v in buckets):
             self._draw_chrome(c, w, "")
             c.create_text(w // 2, h // 2, text="no cost data",
-                          fill=DIM, font=("Segoe UI", 8))
+                          fill=TEXT_DIM, font=("Segoe UI", 8))
             return
 
         bar_left = TIME_PAD
@@ -725,7 +751,7 @@ class LocDock(tk.Tk):
             x0 = bar_left + i * bar_w
             x1 = x0 + bar_w - 1
             bh = max((v / max_val) * usable_h, 1)
-            c.create_rectangle(x0, bottom - bh, x1, bottom, fill=ACCENT2, outline="")
+            c.create_rectangle(x0, bottom - bh, x1, bottom, fill=COST_CLR, outline="")
 
     def _draw_token_chart(self, c, w, h):
         since = self._range_start()
@@ -737,7 +763,7 @@ class LocDock(tk.Tk):
         if not buckets or all(sum(b) == 0 for b in buckets):
             self._draw_chrome(c, w, "")
             c.create_text(w // 2, h // 2, text="no token data",
-                          fill=DIM, font=("Segoe UI", 8))
+                          fill=TEXT_DIM, font=("Segoe UI", 8))
             return
 
         bar_left = TIME_PAD
@@ -754,7 +780,7 @@ class LocDock(tk.Tk):
             x0 = bar_left + i * bar_w
             x1 = x0 + bar_w - 1
             y = bottom
-            for val, color in zip([cr, cw, out, inp], [BLUE, YELLOW, PINK, FG]):
+            for val, color in zip([cr, cw, out, inp], [TOK_CACHE_READ, TOK_CACHE_WRITE, TOK_OUTPUT, TOK_INPUT]):
                 if val <= 0:
                     continue
                 bh = max((val / max_val) * usable_h, 1)

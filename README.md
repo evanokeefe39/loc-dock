@@ -44,6 +44,49 @@ Set environment variables or copy `.env.example` to `.env` and edit:
 | `LOCDOCK_TIMEZONE` | `Europe/Berlin` | IANA timezone for day boundary |
 | `LOCDOCK_DAY_START_HOUR` | `7` | Hour when "today" starts (24h) |
 
+## Theming
+
+Edit `theme.yaml` to change colors and transparency. All fields are optional — missing keys fall back to defaults.
+
+```yaml
+# Window
+alpha: 0.92              # 0.0 = invisible, 1.0 = opaque
+bg: "#1a1a2e"            # main background
+chart_bg: "#12121f"      # chart background
+tooltip_bg: "#222244"    # cost breakdown tooltip
+
+# Text
+text: "#e0e0e0"          # primary text
+text_dim: "#6b7280"      # secondary text, labels, separators
+axis: "#333350"          # chart axis lines and ticks
+
+# LOC
+loc_add: "#34d399"       # lines added
+loc_del: "#ef4444"       # lines deleted
+
+# Cost
+cost: "#a78bfa"          # cost label and chart bars
+
+# Sessions
+sessions: "#f97316"      # active session count
+
+# Tokens
+tok_input: "#e0e0e0"     # input tokens
+tok_output: "#f472b6"    # output tokens
+tok_cache_write: "#facc15"  # cache write tokens
+tok_cache_read: "#38bdf8"   # cache read tokens
+```
+
+## Run at startup (Windows)
+
+`start-hidden.vbs` launches the widget without a console window. To run it automatically on login:
+
+```
+powershell -Command "$ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut(\"$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\loc-dock.lnk\"); $sc.TargetPath = 'C:\path\to\loc-dock\start-hidden.vbs'; $sc.WorkingDirectory = 'C:\path\to\loc-dock'; $sc.Save()"
+```
+
+To remove it, delete the shortcut from `shell:startup`.
+
 ## How it works
 
 - Scans all git repos in `LOCDOCK_REPOS_DIR` for commits since day start

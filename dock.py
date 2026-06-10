@@ -506,17 +506,24 @@ class LocDock(tk.Tk):
         self._git_points: list = []
         self._cost_points: list[tuple[datetime, float]] = []
         self._token_points: list[tuple] = []
-        _empty_breakdown = {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0}
-        self._cost_breakdown: dict = {
-            "day": dict(_empty_breakdown),
-            "week": dict(_empty_breakdown),
+        _zero_breakdown = {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0}
+        _zero_tokens = _empty_tokens()
+        self._stats: dict = {
+            "day": {
+                "cost_breakdown": dict(_zero_breakdown),
+                "tokens": dict(_zero_tokens),
+                "sessions": (0, 0),
+            },
+            "week": {
+                "cost_breakdown": dict(_zero_breakdown),
+                "tokens": dict(_zero_tokens),
+                "sessions": (0, 0),
+            },
         }
         self._time_start_str = "07:00"
         self._time_end_str = "now"
         self._time_start_dt = day_start()
         self._time_end_dt = datetime.now(TZ)
-        self._sess_today = 0
-        self._sess_active = 0
         self._chart_mode = "loc"
         self._chart_modes = ["loc", "cost", "tokens"]
         self._time_range = "day"
@@ -659,7 +666,7 @@ class LocDock(tk.Tk):
 
     def _show_tooltip(self, event=None):
         self._hide_tooltip()
-        cb = self._cost_breakdown[self._time_range]
+        cb = self._stats[self._time_range]["cost_breakdown"]
         total = sum(cb.values())
         text = (
             f"IN   ${cb['input']:.2f}  @$15/MTok\n"
@@ -920,33 +927,32 @@ class LocDock(tk.Tk):
         except Exception as exc:
             log.error("Store load: %s", exc)
 
-        since_utc = since.astimezone(timezone.utc)
+        week_utc = since.astimezone(timezone.utc)
+        day_utc = day_start().astimezone(timezone.utc)
 
         try:
-            self._cost_points = self.store.query_cost_timeline(since_utc)
+            self._cost_points = self.store.query_cost_timeline(week_utc)
         except Exception as exc:
             log.warning("Cost timeline failed: %s", exc)
 
         try:
-            self._token_points = self.store.query_token_timeline(since_utc)
+            self._token_points = self.store.query_token_timeline(week_utc)
         except Exception as exc:
             log.warning("Token timeline failed: %s", exc)
 
-        try:
-            self._cost_breakdown["week"] = self.store.query_cost_breakdown(since_utc)
-        except Exception as exc:
-            log.warning("Cost breakdown (week) failed: %s", exc)
-
-        try:
-            day_utc = day_start().astimezone(timezone.utc)
-            self._cost_breakdown["day"] = self.store.query_cost_breakdown(day_utc)
-        except Exception as exc:
-            log.warning("Cost breakdown (day) failed: %s", exc)
-
-        try:
-            self._sess_today, self._sess_active = self.store.count_sessions(since_utc)
-        except Exception as exc:
-            log.warning("Session count failed: %s", exc)
+        for label, utc in [("week", week_utc), ("day", day_utc)]:
+            try:
+                self._stats[label]["cost_breakdown"] = self.store.query_cost_breakdown(utc)
+            except Exception as exc:
+                log.warning("Cost breakdown (%s) failed: %s", label, exc)
+            try:
+                self._stats[label]["tokens"] = self.store.query_since(utc)
+            except Exception as exc:
+                log.warning("Token totals (%s) failed: %s", label, exc)
+            try:
+                self._stats[label]["sessions"] = self.store.count_sessions(utc)
+            except Exception as exc:
+                log.warning("Session count (%s) failed: %s", label, exc)
 
         self.after(0, self._on_load_done)
 
@@ -979,8 +985,8 @@ class LocDock(tk.Tk):
         self.lbl_added.config(text=f"+{total_added:,}")
         self.lbl_deleted.config(text=f"-{total_deleted:,}")
 
-        since_utc = since.astimezone(timezone.utc)
-        t = self.store.query_since(since_utc)
+        s = self._stats[self._time_range]
+        t = s["tokens"]
         total = (t["input_tokens"] + t["output_tokens"]
                  + t["cache_creation_input_tokens"] + t["cache_read_input_tokens"])
 
@@ -991,8 +997,9 @@ class LocDock(tk.Tk):
         self.lbl_total.config(text=fmt_tokens(total))
         self.lbl_cost.config(text=f"${estimate_cost(t):.2f}")
 
-        self.lbl_sess_active.config(text=str(self._sess_active))
-        self.lbl_sess_today.config(text=str(self._sess_today))
+        sess_today, sess_active = s["sessions"]
+        self.lbl_sess_active.config(text=str(sess_active))
+        self.lbl_sess_today.config(text=str(sess_today))
 
         if self._pinned:
             self._snap_to_corner()
@@ -1001,6 +1008,17 @@ class LocDock(tk.Tk):
 
 
 if __name__ == "__main__":
+    if "--bg" in sys.argv:
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0
+        subprocess.Popen(
+            [sys.executable, __file__],
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+            startupinfo=si, close_fds=True,
+        )
+        sys.exit(0)
+
     log.info("LOC Dock starting")
     if not REPOS_DIR.exists():
         log.warning("Repos dir not found: %s", REPOS_DIR)

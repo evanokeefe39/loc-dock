@@ -31,7 +31,13 @@ Three chart modes (click to toggle):
 uv run dock.py
 ```
 
-Dependencies (`duckdb`, `tzdata`) are installed automatically by `uv`.
+Run in the background (returns terminal immediately):
+
+```
+uv run dock.py --bg
+```
+
+Dependencies (`duckdb`, `tzdata`, `pyyaml`, `Pillow`) are installed automatically by `uv`.
 
 ## Configuration
 

@@ -561,10 +561,12 @@ class LocDock(tk.Tk):
         close_btn.pack(side="right")
         close_btn.bind("<Button-1>", lambda e: self.destroy())
 
-        self.lbl_spinner = tk.Label(
-            top, text="", bg=BG, fg=TEXT_DIM, font=("Segoe UI", 7),
+        self.btn_pin = tk.Label(
+            top, text="", bg=BG, fg=TEXT_DIM,
+            font=("Segoe UI", 7), cursor="hand2",
         )
-        self.lbl_spinner.pack(side="right", padx=(0, 3))
+        self.btn_pin.pack(side="right", padx=(0, 2))
+        self.btn_pin.bind("<Button-1>", self._click_pin)
 
         btn_font = ("Segoe UI", 7)
         btn_kw = dict(bg=CHART_BG, fg=TEXT_DIM, font=btn_font, cursor="hand2",
@@ -595,6 +597,11 @@ class LocDock(tk.Tk):
         self.lbl_cache_w = self._inline_stat(bot, "CW", TOK_CACHE_WRITE)
         self.lbl_cache_r = self._inline_stat(bot, "CR", TOK_CACHE_READ)
         self.lbl_total = self._inline_stat(bot, "TOT")
+
+        self.lbl_spinner = tk.Label(
+            bot, text="", bg=BG, fg=TEXT_DIM, font=("Segoe UI", 7),
+        )
+        self.lbl_spinner.pack(side="right", padx=(0, 3))
 
         # ── Drag (unpins from corner) ──
         self._drag_x = 0
@@ -677,11 +684,18 @@ class LocDock(tk.Tk):
         self._drag_y = event.y
 
     def _on_drag(self, event):
-        self._pinned = False
+        if self._pinned:
+            self._pinned = False
+            self.btn_pin.config(text="\U0001F4CC")
         self.geometry(
             f"+{self.winfo_x() + event.x - self._drag_x}"
             f"+{self.winfo_y() + event.y - self._drag_y}"
         )
+
+    def _click_pin(self, event=None):
+        self._pinned = True
+        self.btn_pin.config(text="")
+        self._snap_to_corner()
 
     def _draw_chart(self):
         c = self.chart

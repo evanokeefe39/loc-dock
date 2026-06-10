@@ -70,9 +70,13 @@ def get_git_loc_timeline(repos_dir: Path, since: datetime) -> list[tuple[datetim
         if not entry.is_dir() or not (entry / ".git").exists():
             continue
         try:
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = 0
             result = subprocess.run(
                 ["git", "log", f"--since={since_iso}", "--format=%aI", "--numstat"],
                 capture_output=True, text=True, cwd=str(entry), timeout=10,
+                startupinfo=si, creationflags=subprocess.CREATE_NO_WINDOW,
             )
             if result.returncode != 0:
                 continue
@@ -101,9 +105,8 @@ def get_git_loc_timeline(repos_dir: Path, since: datetime) -> list[tuple[datetim
     return points
 
 
-def bucket_timeline(points: list[tuple[datetime, int, int]], since: datetime, n_buckets: int = 32) -> list[tuple[int, int]]:
-    """Bucket commit data into n_buckets time slots over a fixed 24h window."""
-    total_seconds = 24 * 3600
+def bucket_timeline(points: list[tuple[datetime, int, int]], since: datetime, until: datetime, n_buckets: int = 32) -> list[tuple[int, int]]:
+    total_seconds = (until - since).total_seconds() or 1
     buckets: list[tuple[int, int]] = [(0, 0)] * n_buckets
 
     for ts, added, deleted in points:
@@ -331,8 +334,8 @@ def fmt_tokens(n: int) -> str:
     return str(n)
 
 
-def bucket_cost_timeline(points: list[tuple[datetime, float]], since: datetime, n_buckets: int = 32) -> list[float]:
-    total_seconds = 24 * 3600
+def bucket_cost_timeline(points: list[tuple[datetime, float]], since: datetime, until: datetime, n_buckets: int = 32) -> list[float]:
+    total_seconds = (until - since).total_seconds() or 1
     buckets = [0.0] * n_buckets
     for ts, cost in points:
         if not isinstance(ts, datetime):
@@ -346,9 +349,9 @@ def bucket_cost_timeline(points: list[tuple[datetime, float]], since: datetime, 
 
 
 def bucket_token_timeline(
-    points: list[tuple], since: datetime, n_buckets: int = 32,
+    points: list[tuple], since: datetime, until: datetime, n_buckets: int = 32,
 ) -> list[tuple[int, int, int, int]]:
-    total_seconds = 24 * 3600
+    total_seconds = (until - since).total_seconds() or 1
     buckets = [(0, 0, 0, 0)] * n_buckets
     for row in points:
         ts = row[0]
@@ -396,6 +399,8 @@ class LocDock(tk.Tk):
         self._cost_breakdown: dict = {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0}
         self._time_start_str = "07:00"
         self._time_end_str = "now"
+        self._time_start_dt = day_start()
+        self._time_end_dt = datetime.now(TZ)
         self._sess_today = 0
         self._sess_active = 0
         self._chart_mode = "loc"
@@ -586,14 +591,27 @@ class LocDock(tk.Tk):
             self._draw_token_chart(c, w, h)
 
     def _draw_time_labels(self, c, w, axis_y):
-        c.create_text(
-            4, axis_y + 2, text=self._time_start_str,
-            fill=DIM, font=("Segoe UI", 7), anchor="nw",
-        )
-        c.create_text(
-            w - 4, axis_y + 2, text=self._time_end_str,
-            fill=DIM, font=("Segoe UI", 7), anchor="ne",
-        )
+        since = self._time_start_dt
+        now = self._time_end_dt
+        span = (now - since).total_seconds()
+        if span <= 0:
+            return
+        font = ("Segoe UI", 7)
+        tick_h = 3
+        c.create_text(4, axis_y + 2, text=self._time_start_str,
+                       fill=DIM, font=font, anchor="nw")
+        first_tick = since.replace(minute=0, second=0, microsecond=0)
+        if first_tick <= since:
+            first_tick += timedelta(hours=3 - (first_tick.hour % 3) if first_tick.hour % 3 else 3)
+        t = first_tick
+        while t < now:
+            frac = (t - since).total_seconds() / span
+            x = TIME_PAD + frac * (w - 2 * TIME_PAD)
+            if x > TIME_PAD + 12:
+                c.create_line(x, axis_y, x, axis_y + tick_h, fill=AXIS_CLR)
+                c.create_text(x, axis_y + 3, text=t.strftime("%H"),
+                              fill=DIM, font=font, anchor="n")
+            t += timedelta(hours=3)
 
     def _draw_chrome(self, c, w, y_max_str: str):
         c.create_text(
@@ -607,8 +625,8 @@ class LocDock(tk.Tk):
             )
 
     def _draw_loc_chart(self, c, w, h):
-        buckets = bucket_timeline(self._git_points, day_start(), N_BUCKETS)
-        bottom = h - 12
+        buckets = bucket_timeline(self._git_points, day_start(), datetime.now(TZ), N_BUCKETS)
+        bottom = h - 18
         c.create_line(0, bottom, w, bottom, fill=AXIS_CLR, width=1)
         self._draw_time_labels(c, w, bottom)
 
@@ -646,8 +664,8 @@ class LocDock(tk.Tk):
 
     def _draw_cost_chart(self, c, w, h):
         since = day_start()
-        buckets = bucket_cost_timeline(self._cost_points, since, N_BUCKETS)
-        bottom = h - 12
+        buckets = bucket_cost_timeline(self._cost_points, since, datetime.now(TZ), N_BUCKETS)
+        bottom = h - 18
         c.create_line(0, bottom, w, bottom, fill=AXIS_CLR, width=1)
         self._draw_time_labels(c, w, bottom)
 
@@ -676,8 +694,8 @@ class LocDock(tk.Tk):
 
     def _draw_token_chart(self, c, w, h):
         since = day_start()
-        buckets = bucket_token_timeline(self._token_points, since, N_BUCKETS)
-        bottom = h - 12
+        buckets = bucket_token_timeline(self._token_points, since, datetime.now(TZ), N_BUCKETS)
+        bottom = h - 18
         c.create_line(0, bottom, w, bottom, fill=AXIS_CLR, width=1)
         self._draw_time_labels(c, w, bottom)
 
@@ -779,9 +797,11 @@ class LocDock(tk.Tk):
 
         self._time_start_str = since.strftime("%H:%M")
         self._time_end_str = now_local.strftime("%H:%M")
+        self._time_start_dt = since
+        self._time_end_dt = now_local
         self._draw_chart()
 
-        loc_buckets = bucket_timeline(self._git_points, since, N_BUCKETS)
+        loc_buckets = bucket_timeline(self._git_points, since, now_local, N_BUCKETS)
         total_added = sum(a for a, _ in loc_buckets)
         total_deleted = sum(d for _, d in loc_buckets)
         self.lbl_added.config(text=f"+{total_added:,}")

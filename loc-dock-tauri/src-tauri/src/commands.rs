@@ -25,6 +25,7 @@ pub struct SettingsData {
     pub day_start_hour: u32,
     pub week_start_day: u32,
     pub theme_path: String,
+    pub autostart: bool,
 }
 
 #[tauri::command]
@@ -37,6 +38,7 @@ pub fn get_settings(app: AppHandle) -> SettingsData {
         day_start_hour: config.day_start_hour,
         week_start_day: config.week_start_day,
         theme_path: config.theme_path.to_string_lossy().to_string(),
+        autostart: config.autostart,
     }
 }
 
@@ -46,11 +48,20 @@ pub fn save_settings(app: AppHandle, settings: SettingsData) -> Result<(), Strin
     let env_path = config.config_dir.join(".env");
     std::fs::create_dir_all(&config.config_dir).map_err(|e| e.to_string())?;
     let content = format!(
-        "LOCDOCK_REPOS_DIR={}\nLOCDOCK_CLAUDE_DIR={}\nLOCDOCK_TIMEZONE={}\nLOCDOCK_DAY_START_HOUR={}\nLOCDOCK_WEEK_START_DAY={}\nLOCDOCK_THEME_PATH={}\n",
+        "LOCDOCK_REPOS_DIR={}\nLOCDOCK_CLAUDE_DIR={}\nLOCDOCK_TIMEZONE={}\nLOCDOCK_DAY_START_HOUR={}\nLOCDOCK_WEEK_START_DAY={}\nLOCDOCK_THEME_PATH={}\nLOCDOCK_AUTOSTART={}\n",
         settings.repos_dir, settings.claude_dir, settings.timezone,
         settings.day_start_hour, settings.week_start_day, settings.theme_path,
+        settings.autostart,
     );
     std::fs::write(&env_path, content).map_err(|e| e.to_string())?;
+
+    let autostart = app.state::<tauri_plugin_autostart::AutoLaunchManager>();
+    if settings.autostart {
+        let _ = autostart.enable();
+    } else {
+        let _ = autostart.disable();
+    }
+
     Ok(())
 }
 

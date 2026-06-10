@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { useStats } from "./hooks/useStats";
 import { useTheme } from "./hooks/useTheme";
 import { TopRow } from "./components/TopRow";
@@ -36,6 +37,11 @@ function App() {
     }
   }, [theme]);
 
+  useEffect(() => {
+    const unlisten = listen("open-settings", () => setSettingsOpen(true));
+    return () => { unlisten.then(f => f()); };
+  }, []);
+
   const currentStats = stats ? stats[range] : null;
   const MODES: ChartMode[] = ["loc", "cost", "tokens"];
 
@@ -43,7 +49,7 @@ function App() {
     invoke("snap_to_corner", { corner });
   };
 
-  const handleClose = () => getCurrentWindow().close();
+  const handleClose = () => getCurrentWindow().hide();
 
   return (
     <div className="app" data-tauri-drag-region>

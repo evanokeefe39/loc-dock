@@ -9,6 +9,7 @@ pub struct Config {
     pub week_start_day: u32,
     pub config_dir: PathBuf,
     pub theme_path: PathBuf,
+    pub autostart: bool,
 }
 
 impl Config {
@@ -51,6 +52,10 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|_| config_dir.join("theme.yaml"));
 
+        let autostart = std::env::var("LOCDOCK_AUTOSTART")
+            .map(|s| s == "true" || s == "1")
+            .unwrap_or(false);
+
         Config {
             repos_dir,
             claude_dir,
@@ -60,6 +65,7 @@ impl Config {
             week_start_day,
             config_dir,
             theme_path,
+            autostart,
         }
     }
 

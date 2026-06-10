@@ -269,6 +269,19 @@ html, body {
   max-width: 180px;
 }
 
+.settings-checkbox {
+  flex-direction: row-reverse;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.settings-checkbox input[type="checkbox"] {
+  flex: 0;
+  width: 14px;
+  height: 14px;
+  accent-color: var(--cost);
+  cursor: pointer;
+}
+
 .settings-divider {
   height: 1px;
   background: var(--text-dim);

@@ -10,6 +10,7 @@ interface Settings {
   day_start_hour: number;
   week_start_day: number;
   theme_path: string;
+  autostart: boolean;
 }
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
@@ -77,7 +78,7 @@ export function SettingsPanel({ visible, onClose }: Props) {
 
   if (!visible || !settings) return null;
 
-  const update = (field: keyof Settings, value: string | number) => {
+  const update = (field: keyof Settings, value: string | number | boolean) => {
     const updated = { ...settings, [field]: value };
     setSettings(updated);
     setDirty(JSON.stringify(updated) !== original.current);
@@ -158,6 +159,15 @@ export function SettingsPanel({ visible, onClose }: Props) {
               <option key={i} value={i}>{d}</option>
             ))}
           </select>
+        </label>
+
+        <label className="settings-checkbox">
+          <input
+            type="checkbox"
+            checked={settings.autostart}
+            onChange={e => update("autostart", e.target.checked)}
+          />
+          <span>Start on login</span>
         </label>
 
         {saved && (

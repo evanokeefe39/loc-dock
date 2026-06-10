@@ -75,8 +75,8 @@ impl Default for Theme {
 }
 
 impl Theme {
-    pub fn load(config_dir: &Path) -> Self {
-        let path = config_dir.join("theme.yaml");
+    pub fn load(theme_path: &Path) -> Self {
+        let path = theme_path;
         let mut theme = if path.exists() {
             match std::fs::read_to_string(&path) {
                 Ok(content) => {

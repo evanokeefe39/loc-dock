@@ -8,6 +8,7 @@ pub struct Config {
     pub day_start_hour: u32,
     pub week_start_day: u32,
     pub config_dir: PathBuf,
+    pub theme_path: PathBuf,
 }
 
 impl Config {
@@ -46,6 +47,10 @@ impl Config {
             .unwrap_or(0)
             .min(6);
 
+        let theme_path = std::env::var("LOCDOCK_THEME_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| config_dir.join("theme.yaml"));
+
         Config {
             repos_dir,
             claude_dir,
@@ -54,6 +59,7 @@ impl Config {
             day_start_hour,
             week_start_day,
             config_dir,
+            theme_path,
         }
     }
 

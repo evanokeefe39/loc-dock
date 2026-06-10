@@ -19,7 +19,7 @@ pub fn run() {
     env_logger::init();
 
     let config = Arc::new(Config::load());
-    let theme = Theme::load(&config.config_dir);
+    let theme = Theme::load(&config.theme_path);
     let stats: SharedStats = Arc::new(RwLock::new(AllStats::default()));
 
     tauri::Builder::default()

@@ -7,7 +7,6 @@ interface Settings {
   timezone: string;
   day_start_hour: number;
   week_start_day: number;
-  config_dir: string;
   theme_path: string;
 }
 
@@ -93,13 +92,7 @@ export function SettingsPanel({ visible, onClose }: Props) {
 
         <label>
           <span>Theme file</span>
-          <span className="settings-path">{settings.theme_path}</span>
-        </label>
-
-        <label>
-          <span>Config dir</span>
-          <span className="settings-path">{settings.config_dir}</span>
-        </label>
+          <input value={settings.theme_path} onChange={e => update("theme_path", e.target.value)} />
 
         <div className="settings-footer">
           <button className="settings-save" onClick={handleSave} disabled={saving}>

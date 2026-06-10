@@ -10,7 +10,9 @@ Run:  uv run dock.py
 
 import logging
 import os
+import re
 import subprocess
+import sys
 import threading
 import tkinter as tk
 from datetime import datetime, timezone, timedelta
@@ -33,9 +35,13 @@ REFRESH_DATA_MS = 60_000
 CLAUDE_DIR = Path(os.environ.get("LOCDOCK_CLAUDE_DIR", Path.home() / ".claude"))
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 REPOS_DIR = Path(os.environ.get("LOCDOCK_REPOS_DIR", Path.home() / "repos"))
-TZ = ZoneInfo(os.environ.get("LOCDOCK_TIMEZONE", "Europe/Berlin"))
-DAY_START_HOUR = int(os.environ.get("LOCDOCK_DAY_START_HOUR", "7"))
-WEEK_START_DAY = int(os.environ.get("LOCDOCK_WEEK_START_DAY", "0"))  # 0=Mon, 6=Sun
+try:
+    TZ = ZoneInfo(os.environ.get("LOCDOCK_TIMEZONE", "Europe/Berlin"))
+except KeyError:
+    log.warning("Invalid LOCDOCK_TIMEZONE, falling back to UTC")
+    TZ = ZoneInfo("UTC")
+DAY_START_HOUR = max(0, min(23, int(os.environ.get("LOCDOCK_DAY_START_HOUR", "7"))))
+WEEK_START_DAY = max(0, min(6, int(os.environ.get("LOCDOCK_WEEK_START_DAY", "0"))))  # 0=Mon, 6=Sun
 
 PRICING = {
     "input":        15.00,
@@ -56,6 +62,8 @@ _THEME_DEFAULTS = {
     "tok_cache_write": "#facc15", "tok_cache_read": "#38bdf8",
 }
 
+_HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
 def _load_theme() -> dict:
     theme = dict(_THEME_DEFAULTS)
     if _THEME_PATH.exists():
@@ -64,6 +72,17 @@ def _load_theme() -> dict:
                 theme.update(yaml.safe_load(f) or {})
         except (yaml.YAMLError, OSError) as exc:
             log.warning("Bad theme.yaml, using defaults: %s", exc)
+    alpha = theme.get("alpha", 0.92)
+    if not isinstance(alpha, (int, float)):
+        log.warning("theme: alpha must be a number, using default")
+        alpha = 0.92
+    theme["alpha"] = max(0.0, min(1.0, float(alpha)))
+    for key in list(theme):
+        if key == "alpha":
+            continue
+        if not isinstance(theme[key], str) or not _HEX_COLOR_RE.match(theme[key]):
+            log.warning("theme: invalid color for %s, using default", key)
+            theme[key] = _THEME_DEFAULTS[key]
     return theme
 
 _T = _load_theme()
@@ -85,9 +104,32 @@ TOK_CACHE_READ = _T["tok_cache_read"]
 
 
 # ── Git LOC with timestamps ─────────────────────────────────────────
+_GIT_AVAILABLE = None
+
+def _check_git() -> bool:
+    global _GIT_AVAILABLE
+    if _GIT_AVAILABLE is not None:
+        return _GIT_AVAILABLE
+    try:
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0
+        subprocess.run(
+            ["git", "--version"], capture_output=True, timeout=5,
+            startupinfo=si, creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        _GIT_AVAILABLE = True
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        log.warning("git not found on PATH; LOC tracking disabled")
+        _GIT_AVAILABLE = False
+    return _GIT_AVAILABLE
+
+
 def get_git_loc_timeline(repos_dir: Path, since: datetime) -> list[tuple[datetime, int, int]]:
     """Return list of (commit_time, added, deleted) across all repos since `since`."""
     points: list[tuple[datetime, int, int]] = []
+    if not _check_git():
+        return points
     if not repos_dir.exists():
         return points
 
@@ -223,6 +265,8 @@ class UsageStore:
             return False
 
     def query_since(self, since_utc: datetime) -> dict:
+        if not self._initialised:
+            return _empty_tokens()
         since_str = since_utc.strftime("%Y-%m-%d %H:%M:%S")
         try:
             row = self._con.execute(
@@ -249,6 +293,8 @@ class UsageStore:
 
     def query_cost_timeline(self, since_utc: datetime) -> list[tuple[datetime, float]]:
         """Return (timestamp, cost) pairs for charting."""
+        if not self._initialised:
+            return []
         since_str = since_utc.strftime("%Y-%m-%d %H:%M:%S")
         try:
             rows = self._con.execute(
@@ -272,6 +318,8 @@ class UsageStore:
 
     def query_cost_breakdown(self, since_utc: datetime) -> dict:
         """Return per-category dollar costs."""
+        if not self._initialised:
+            return {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0}
         since_str = since_utc.strftime("%Y-%m-%d %H:%M:%S")
         try:
             row = self._con.execute(
@@ -299,6 +347,8 @@ class UsageStore:
 
     def query_token_timeline(self, since_utc: datetime) -> list[tuple]:
         """Return (ts, input, output, cache_write, cache_read) for charting."""
+        if not self._initialised:
+            return []
         since_str = since_utc.strftime("%Y-%m-%d %H:%M:%S")
         try:
             rows = self._con.execute(
@@ -318,6 +368,8 @@ class UsageStore:
 
     def count_sessions(self, since_utc: datetime) -> tuple[int, int]:
         """Return (today, active) from already-loaded DuckDB data."""
+        if not self._initialised:
+            return (0, 0)
         since_str = since_utc.strftime("%Y-%m-%d %H:%M:%S")
         active_str = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime(
             "%Y-%m-%d %H:%M:%S"
@@ -688,14 +740,14 @@ class LocDock(tk.Tk):
     def _draw_loc_chart(self, c, w, h):
         buckets = bucket_timeline(self._git_points, self._range_start(), datetime.now(TZ), N_BUCKETS)
         bottom = h - 18
-        c.create_line(0, bottom, w, bottom, fill=AXIS_CLR, width=1)
-        self._draw_time_labels(c, w, bottom)
 
         if not buckets or all(a == 0 and d == 0 for a, d in buckets):
-            self._draw_chrome(c, w, "")
             c.create_text(w // 2, h // 2, text="no commits yet",
                           fill=TEXT_DIM, font=("Segoe UI", 8))
             return
+
+        c.create_line(0, bottom, w, bottom, fill=AXIS_CLR, width=1)
+        self._draw_time_labels(c, w, bottom)
 
         bar_left = TIME_PAD
         bar_zone = w - 2 * TIME_PAD
@@ -894,11 +946,19 @@ class LocDock(tk.Tk):
 
 if __name__ == "__main__":
     log.info("LOC Dock starting")
+    if not REPOS_DIR.exists():
+        log.warning("Repos dir not found: %s", REPOS_DIR)
+    if not PROJECTS_DIR.exists():
+        log.warning("Claude projects dir not found: %s", PROJECTS_DIR)
+    _check_git()
     try:
         app = LocDock()
         app.mainloop()
     except KeyboardInterrupt:
         log.info("Shutdown")
+    except tk.TclError as exc:
+        log.error("Display error (no display?): %s", exc)
+        sys.exit(1)
     except Exception as exc:
         log.exception("Fatal: %s", exc)
         raise

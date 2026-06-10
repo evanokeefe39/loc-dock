@@ -9,6 +9,7 @@ import { Chart } from "./components/Chart";
 import { BottomRow } from "./components/BottomRow";
 import { CostTooltip } from "./components/CostTooltip";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { ResizeBorders } from "./components/ResizeBorders";
 import { TimeRange, ChartMode } from "./lib/types";
 import "./styles/global.css";
 
@@ -61,6 +62,7 @@ function App() {
       <BottomRow tokens={currentStats?.tokens ?? null} loading={!stats} />
       <CostTooltip breakdown={currentStats?.cost_breakdown ?? null} visible={tooltipVisible} />
       <SettingsPanel visible={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <ResizeBorders />
     </div>
   );
 }

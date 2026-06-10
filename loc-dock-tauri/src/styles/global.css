@@ -162,6 +162,21 @@ html, body {
 .spinner { color: var(--text-dim); }
 
 /* ── Tooltip ── */
+/* ── Resize Borders ── */
+.resize-border {
+  position: fixed;
+  z-index: 300;
+  -webkit-app-region: no-drag;
+}
+.resize-n { top: 0; left: 6px; right: 6px; height: 4px; cursor: n-resize; }
+.resize-s { bottom: 0; left: 6px; right: 6px; height: 4px; cursor: s-resize; }
+.resize-e { right: 0; top: 6px; bottom: 6px; width: 4px; cursor: e-resize; }
+.resize-w { left: 0; top: 6px; bottom: 6px; width: 4px; cursor: w-resize; }
+.resize-ne { top: 0; right: 0; width: 6px; height: 6px; cursor: ne-resize; }
+.resize-nw { top: 0; left: 0; width: 6px; height: 6px; cursor: nw-resize; }
+.resize-se { bottom: 0; right: 0; width: 6px; height: 6px; cursor: se-resize; }
+.resize-sw { bottom: 0; left: 0; width: 6px; height: 6px; cursor: sw-resize; }
+
 /* ── Settings Panel ── */
 .settings-overlay {
   position: fixed;

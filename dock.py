@@ -1009,12 +1009,15 @@ class LocDock(tk.Tk):
 
 if __name__ == "__main__":
     if "--bg" in sys.argv:
+        import shutil
+        uv = shutil.which("uv")
+        cmd = [uv, "run", __file__] if uv else [sys.executable, __file__]
         si = subprocess.STARTUPINFO()
         si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         si.wShowWindow = 0
         subprocess.Popen(
-            [sys.executable, __file__],
-            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+            cmd,
+            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
             startupinfo=si, close_fds=True,
         )
         sys.exit(0)

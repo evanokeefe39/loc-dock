@@ -220,7 +220,7 @@ html, body {
   padding: 1px 8px;
   cursor: pointer;
 }
-.settings-close:hover { color: var(--cost); border-color: var(--cost); }
+.settings-close:hover { background: var(--cost); color: var(--bg); border-color: var(--cost); }
 
 .settings-save-btn {
   background: none;
@@ -256,7 +256,7 @@ html, body {
 }
 
 .settings-panel select {
-  max-width: 120px;
+  max-width: 180px;
 }
 
 .settings-divider {

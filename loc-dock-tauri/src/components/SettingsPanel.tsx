@@ -14,6 +14,23 @@ interface Settings {
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
+const TIMEZONES = [
+  "UTC",
+  "US/Eastern", "US/Central", "US/Mountain", "US/Pacific", "US/Alaska", "US/Hawaii",
+  "Canada/Eastern", "Canada/Central", "Canada/Mountain", "Canada/Pacific",
+  "Europe/London", "Europe/Dublin", "Europe/Berlin", "Europe/Paris", "Europe/Madrid",
+  "Europe/Rome", "Europe/Amsterdam", "Europe/Brussels", "Europe/Vienna",
+  "Europe/Zurich", "Europe/Stockholm", "Europe/Oslo", "Europe/Helsinki",
+  "Europe/Warsaw", "Europe/Prague", "Europe/Budapest", "Europe/Bucharest",
+  "Europe/Athens", "Europe/Istanbul", "Europe/Moscow", "Europe/Kiev",
+  "Asia/Dubai", "Asia/Kolkata", "Asia/Bangkok", "Asia/Singapore",
+  "Asia/Hong_Kong", "Asia/Shanghai", "Asia/Tokyo", "Asia/Seoul",
+  "Australia/Sydney", "Australia/Melbourne", "Australia/Perth",
+  "Pacific/Auckland", "Pacific/Fiji",
+  "America/Sao_Paulo", "America/Argentina/Buenos_Aires", "America/Mexico_City",
+  "Africa/Cairo", "Africa/Johannesburg", "Africa/Lagos",
+];
+
 interface Props {
   visible: boolean;
   onClose: () => void;
@@ -94,7 +111,14 @@ export function SettingsPanel({ visible, onClose }: Props) {
 
         <label>
           <span>Timezone</span>
-          <input value={settings.timezone} onChange={e => update("timezone", e.target.value)} />
+          <select value={settings.timezone} onChange={e => update("timezone", e.target.value)}>
+            {!TIMEZONES.includes(settings.timezone) && (
+              <option value={settings.timezone}>{settings.timezone}</option>
+            )}
+            {TIMEZONES.map(tz => (
+              <option key={tz} value={tz}>{tz}</option>
+            ))}
+          </select>
         </label>
 
         <label>

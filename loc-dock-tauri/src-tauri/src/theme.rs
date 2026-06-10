@@ -76,6 +76,9 @@ impl Default for Theme {
 
 impl Theme {
     pub fn load(theme_path: &Path) -> Self {
+        if !theme_path.exists() {
+            Self::create_default(theme_path);
+        }
         let path = theme_path;
         let mut theme = if path.exists() {
             match std::fs::read_to_string(&path) {
@@ -98,6 +101,38 @@ impl Theme {
         };
         theme.validate();
         theme
+    }
+
+    fn create_default(path: &Path) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let content = r#"# LOC Dock Theme
+# Edit colors below. All values are hex (#RRGGBB).
+
+alpha: 0.92              # 0.0 = invisible, 1.0 = opaque
+bg: "#202020"            # main background
+chart_bg: "#181818"      # chart background
+tooltip_bg: "#2a2a2a"    # cost breakdown tooltip
+
+text: "#e0e0e0"          # primary text
+text_dim: "#6b7280"      # secondary text, labels
+axis: "#333333"          # chart axis lines
+
+loc_add: "#34d399"       # lines added
+loc_del: "#ef4444"       # lines deleted
+cost: "#a78bfa"          # cost label and chart
+sessions: "#f97316"      # active session count
+
+tok_input: "#e0e0e0"     # input tokens
+tok_output: "#f472b6"    # output tokens
+tok_cache_write: "#facc15"  # cache write tokens
+tok_cache_read: "#38bdf8"   # cache read tokens
+"#;
+        match std::fs::write(path, content) {
+            Ok(_) => log::info!("Created default theme at {}", path.display()),
+            Err(e) => warn!("Failed to create default theme: {}", e),
+        }
     }
 
     fn validate(&mut self) {

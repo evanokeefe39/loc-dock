@@ -16,8 +16,7 @@ html, body {
   flex-direction: column;
   height: 100vh;
   -webkit-app-region: drag;
-  background: var(--bg);
-  opacity: var(--alpha, 0.92);
+  background: var(--bg-alpha, var(--bg));
   border-radius: 4px;
 }
 

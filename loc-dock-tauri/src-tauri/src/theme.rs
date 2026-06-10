@@ -3,12 +3,12 @@ use std::path::Path;
 use log::warn;
 
 fn default_alpha() -> f64 { 0.92 }
-fn default_bg() -> String { "#1a1a2e".into() }
-fn default_chart_bg() -> String { "#12121f".into() }
-fn default_tooltip_bg() -> String { "#222244".into() }
+fn default_bg() -> String { "#202020".into() }
+fn default_chart_bg() -> String { "#181818".into() }
+fn default_tooltip_bg() -> String { "#2a2a2a".into() }
 fn default_text() -> String { "#e0e0e0".into() }
 fn default_text_dim() -> String { "#6b7280".into() }
-fn default_axis() -> String { "#333350".into() }
+fn default_axis() -> String { "#333333".into() }
 fn default_loc_add() -> String { "#34d399".into() }
 fn default_loc_del() -> String { "#ef4444".into() }
 fn default_cost() -> String { "#a78bfa".into() }

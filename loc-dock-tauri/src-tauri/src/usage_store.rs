@@ -181,15 +181,14 @@ impl UsageStore {
         }
     }
 
-    /// Return per-entry (timestamp_string, cost) pairs ordered by time,
-    /// for building the cost chart.
-    pub fn query_cost_timeline(&self, since_str: &str) -> Vec<(String, f64)> {
+    /// Return per-entry (epoch_seconds, cost) pairs ordered by time.
+    pub fn query_cost_timeline(&self, since_str: &str) -> Vec<(f64, f64)> {
         if !self.initialized {
             return Vec::new();
         }
         match self.con.prepare(
             r#"
-            SELECT ts::VARCHAR,
+            SELECT epoch(ts)::DOUBLE,
                 (input_tokens / 1e6) * ? +
                 (output_tokens / 1e6) * ? +
                 (cache_creation_input_tokens / 1e6) * ? +
@@ -209,9 +208,9 @@ impl UsageStore {
                         since_str,
                     ],
                     |row| {
-                        let ts: String = row.get(0)?;
+                        let epoch: f64 = row.get(0)?;
                         let cost: f64 = row.get(1)?;
-                        Ok((ts, cost))
+                        Ok((epoch, cost))
                     },
                 ) {
                     Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
@@ -274,15 +273,15 @@ impl UsageStore {
         }
     }
 
-    /// Return per-entry token breakdown ordered by time, for charting.
-    /// Each tuple: (timestamp_string, input, output, cache_write, cache_read).
-    pub fn query_token_timeline(&self, since_str: &str) -> Vec<(String, i64, i64, i64, i64)> {
+    /// Return per-entry token breakdown ordered by time.
+    /// Each tuple: (epoch_seconds, input, output, cache_write, cache_read).
+    pub fn query_token_timeline(&self, since_str: &str) -> Vec<(f64, i64, i64, i64, i64)> {
         if !self.initialized {
             return Vec::new();
         }
         match self.con.prepare(
             r#"
-            SELECT ts::VARCHAR, input_tokens, output_tokens,
+            SELECT epoch(ts)::DOUBLE, input_tokens, output_tokens,
                    cache_creation_input_tokens, cache_read_input_tokens
             FROM entries
             WHERE ts >= ?::TIMESTAMP
@@ -291,7 +290,7 @@ impl UsageStore {
         ) {
             Ok(mut stmt) => match stmt.query_map([since_str], |row| {
                 Ok((
-                    row.get::<_, String>(0)?,
+                    row.get::<_, f64>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
                     row.get::<_, i64>(3)?,

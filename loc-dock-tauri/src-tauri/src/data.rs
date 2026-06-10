@@ -153,59 +153,48 @@ fn bucket_git(points: &[GitPoint], since: &DateTime<Tz>, until: &DateTime<Tz>) -
 }
 
 fn bucket_cost(
-    points: &[(String, f64)],
+    points: &[(f64, f64)],
     since: &DateTime<Tz>,
     until: &DateTime<Tz>,
 ) -> Vec<f64> {
-    let total_secs = (*until - *since).num_seconds().max(1) as f64;
+    let since_epoch = since.timestamp() as f64;
+    let until_epoch = until.timestamp() as f64;
+    let total_secs = (until_epoch - since_epoch).max(1.0);
     let mut buckets = vec![0.0f64; N_BUCKETS];
-    for (ts_str, cost) in points {
-        if let Some(offset) = parse_ts_offset(ts_str, since, until) {
-            let idx = ((offset / total_secs) * N_BUCKETS as f64) as usize;
-            let idx = idx.min(N_BUCKETS - 1);
-            buckets[idx] += cost;
+    for &(epoch, cost) in points {
+        let offset = epoch - since_epoch;
+        if offset < 0.0 || offset >= total_secs {
+            continue;
         }
+        let idx = ((offset / total_secs) * N_BUCKETS as f64) as usize;
+        let idx = idx.min(N_BUCKETS - 1);
+        buckets[idx] += cost;
     }
     buckets
 }
 
 fn bucket_tokens(
-    points: &[(String, i64, i64, i64, i64)],
+    points: &[(f64, i64, i64, i64, i64)],
     since: &DateTime<Tz>,
     until: &DateTime<Tz>,
 ) -> Vec<(i64, i64, i64, i64)> {
-    let total_secs = (*until - *since).num_seconds().max(1) as f64;
+    let since_epoch = since.timestamp() as f64;
+    let until_epoch = until.timestamp() as f64;
+    let total_secs = (until_epoch - since_epoch).max(1.0);
     let mut buckets = vec![(0i64, 0i64, 0i64, 0i64); N_BUCKETS];
-    for (ts_str, inp, out, cw, cr) in points {
-        if let Some(offset) = parse_ts_offset(ts_str, since, until) {
-            let idx = ((offset / total_secs) * N_BUCKETS as f64) as usize;
-            let idx = idx.min(N_BUCKETS - 1);
-            buckets[idx].0 += inp;
-            buckets[idx].1 += out;
-            buckets[idx].2 += cw;
-            buckets[idx].3 += cr;
+    for &(epoch, inp, out, cw, cr) in points {
+        let offset = epoch - since_epoch;
+        if offset < 0.0 || offset >= total_secs {
+            continue;
         }
+        let idx = ((offset / total_secs) * N_BUCKETS as f64) as usize;
+        let idx = idx.min(N_BUCKETS - 1);
+        buckets[idx].0 += inp;
+        buckets[idx].1 += out;
+        buckets[idx].2 += cw;
+        buckets[idx].3 += cr;
     }
     buckets
-}
-
-fn parse_ts_offset(ts_str: &str, since: &DateTime<Tz>, until: &DateTime<Tz>) -> Option<f64> {
-    let total_secs = (*until - *since).num_seconds().max(1) as f64;
-    let ts = chrono::NaiveDateTime::parse_from_str(ts_str, "%Y-%m-%d %H:%M:%S")
-        .ok()
-        .or_else(|| {
-            ts_str
-                .parse::<chrono::NaiveDateTime>()
-                .ok()
-        })?;
-    let ts_utc = DateTime::<Utc>::from_naive_utc_and_offset(ts, Utc);
-    let local = ts_utc.with_timezone(&since.timezone());
-    let offset = (local - *since).num_seconds() as f64;
-    if offset < 0.0 || offset >= total_secs {
-        None
-    } else {
-        Some(offset)
-    }
 }
 
 fn sum_loc(buckets: &[(i64, i64)]) -> (i64, i64) {

@@ -886,11 +886,6 @@ class LocDock(tk.Tk):
             log.warning("Token timeline failed: %s", exc)
 
         try:
-            self._cost_breakdown = self.store.query_cost_breakdown(since_utc)
-        except Exception as exc:
-            log.warning("Cost breakdown failed: %s", exc)
-
-        try:
             self._sess_today, self._sess_active = self.store.count_sessions(since_utc)
         except Exception as exc:
             log.warning("Session count failed: %s", exc)
@@ -927,6 +922,7 @@ class LocDock(tk.Tk):
         self.lbl_deleted.config(text=f"-{total_deleted:,}")
 
         since_utc = since.astimezone(timezone.utc)
+        self._cost_breakdown = self.store.query_cost_breakdown(since_utc)
         t = self.store.query_since(since_utc)
         total = (t["input_tokens"] + t["output_tokens"]
                  + t["cache_creation_input_tokens"] + t["cache_read_input_tokens"])

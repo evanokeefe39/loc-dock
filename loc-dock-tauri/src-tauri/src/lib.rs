@@ -26,9 +26,12 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(theme)
         .manage(stats.clone())
+        .manage(config.clone())
         .invoke_handler(tauri::generate_handler![
             commands::get_theme,
             commands::get_stats,
+            commands::get_settings,
+            commands::save_settings,
             commands::snap_to_corner,
         ])
         .setup(move |app| {

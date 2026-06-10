@@ -35,7 +35,7 @@ function drawChrome(
   theme: Theme,
 ) {
   if (!label) return;
-  ctx.font = "9px 'Segoe UI'";
+  ctx.font = "10px 'Segoe UI'";
   ctx.fillStyle = theme.text_dim;
   ctx.textAlign = "left";
   ctx.fillText(label, 3, 10);
@@ -53,7 +53,7 @@ export function drawLocChart(
 
   const hasData = buckets.some(([a, d]) => a > 0 || d > 0);
   if (!hasData) {
-    ctx.font = "11px 'Segoe UI'";
+    ctx.font = "10px 'Segoe UI'";
     ctx.fillStyle = theme.text_dim;
     ctx.textAlign = "center";
     ctx.fillText("no commits yet", w / 2, h / 2);
@@ -131,7 +131,7 @@ export function drawCostChart(
   const hasData = buckets.some((v) => v > 0);
   if (!hasData) {
     drawChrome(ctx, "", theme);
-    ctx.font = "11px 'Segoe UI'";
+    ctx.font = "10px 'Segoe UI'";
     ctx.fillStyle = theme.text_dim;
     ctx.textAlign = "center";
     ctx.fillText("no cost data", w / 2, h / 2);
@@ -184,7 +184,7 @@ export function drawTokenChart(
   const hasData = buckets.some(([inp, out, cw, cr]) => inp + out + cw + cr > 0);
   if (!hasData) {
     drawChrome(ctx, "", theme);
-    ctx.font = "11px 'Segoe UI'";
+    ctx.font = "10px 'Segoe UI'";
     ctx.fillStyle = theme.text_dim;
     ctx.textAlign = "center";
     ctx.fillText("no token data", w / 2, h / 2);

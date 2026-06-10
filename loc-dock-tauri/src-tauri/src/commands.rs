@@ -1,6 +1,9 @@
+use crate::config::Config;
 use crate::data::SharedStats;
 use crate::theme::Theme;
 use crate::types::AllStats;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tauri::{AppHandle, Manager, Window};
 
 #[tauri::command]
@@ -12,6 +15,41 @@ pub fn get_theme(app: AppHandle) -> Theme {
 pub fn get_stats(app: AppHandle) -> AllStats {
     let stats = app.state::<SharedStats>();
     stats.read().map(|s| s.clone()).unwrap_or_default()
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SettingsData {
+    pub repos_dir: String,
+    pub claude_dir: String,
+    pub timezone: String,
+    pub day_start_hour: u32,
+    pub week_start_day: u32,
+}
+
+#[tauri::command]
+pub fn get_settings(app: AppHandle) -> SettingsData {
+    let config = app.state::<Arc<Config>>();
+    SettingsData {
+        repos_dir: config.repos_dir.to_string_lossy().to_string(),
+        claude_dir: config.claude_dir.to_string_lossy().to_string(),
+        timezone: config.timezone.clone(),
+        day_start_hour: config.day_start_hour,
+        week_start_day: config.week_start_day,
+    }
+}
+
+#[tauri::command]
+pub fn save_settings(app: AppHandle, settings: SettingsData) -> Result<(), String> {
+    let config = app.state::<Arc<Config>>();
+    let env_path = config.config_dir.join(".env");
+    std::fs::create_dir_all(&config.config_dir).map_err(|e| e.to_string())?;
+    let content = format!(
+        "LOCDOCK_REPOS_DIR={}\nLOCDOCK_CLAUDE_DIR={}\nLOCDOCK_TIMEZONE={}\nLOCDOCK_DAY_START_HOUR={}\nLOCDOCK_WEEK_START_DAY={}\n",
+        settings.repos_dir, settings.claude_dir, settings.timezone,
+        settings.day_start_hour, settings.week_start_day,
+    );
+    std::fs::write(&env_path, content).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]

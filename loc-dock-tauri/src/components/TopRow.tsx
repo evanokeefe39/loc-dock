@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Pin, X, Info } from "lucide-react";
+import { Pin, X, Info, Settings } from "lucide-react";
 import { RangeStats, TimeRange, ChartMode } from "../lib/types";
 import { fmtCost, fmtLoc } from "../lib/format";
 
@@ -12,11 +12,12 @@ interface Props {
   onToggleRange: () => void;
   onToggleMode: () => void;
   onSnapTo: (corner: Corner) => void;
+  onSettings: () => void;
   onClose: () => void;
   onShowTooltip: (show: boolean) => void;
 }
 
-export function TopRow({ stats, range, mode, onToggleRange, onToggleMode, onSnapTo, onClose, onShowTooltip }: Props) {
+export function TopRow({ stats, range, mode, onToggleRange, onToggleMode, onSnapTo, onSettings, onClose, onShowTooltip }: Props) {
   const s = stats;
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -65,6 +66,7 @@ export function TopRow({ stats, range, mode, onToggleRange, onToggleMode, onSnap
           </div>
         )}
       </div>
+      <button className="icon-btn" onClick={onSettings}><Settings size={12} /></button>
       <button className="icon-btn" onClick={onClose}><X size={12} /></button>
     </div>
   );

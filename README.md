@@ -2,7 +2,7 @@
 
 Floating desktop widget that tracks your daily dev metrics at a glance.
 
-![screenshot](screenshot.png)
+<img src="screenshot.png" width="441" alt="LOC Dock screenshot" />
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Tauri](https://img.shields.io/badge/tauri-v2-24C8D8?logo=tauri&logoColor=white)](https://tauri.app)

@@ -1,5 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Save } from "lucide-react";
 
 interface Settings {
   repos_dir: string;
@@ -20,27 +21,33 @@ interface Props {
 export function SettingsPanel({ visible, onClose }: Props) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const original = useRef<string>("");
 
   useEffect(() => {
     if (visible) {
-      invoke<Settings>("get_settings").then(setSettings).catch(console.error);
-      setSaved(false);
+      invoke<Settings>("get_settings").then((s) => {
+        setSettings(s);
+        original.current = JSON.stringify(s);
+        setDirty(false);
+      }).catch(console.error);
     }
   }, [visible]);
 
   if (!visible || !settings) return null;
 
   const update = (field: keyof Settings, value: string | number) => {
-    setSettings({ ...settings, [field]: value });
-    setSaved(false);
+    const updated = { ...settings, [field]: value };
+    setSettings(updated);
+    setDirty(JSON.stringify(updated) !== original.current);
   };
 
   const handleSave = async () => {
     setSaving(true);
     try {
       await invoke("save_settings", { settings });
-      setSaved(true);
+      original.current = JSON.stringify(settings);
+      setDirty(false);
     } catch (e) {
       console.error("Save failed:", e);
     }
@@ -52,7 +59,17 @@ export function SettingsPanel({ visible, onClose }: Props) {
       <div className="settings-panel">
         <div className="settings-header">
           <span>Settings</span>
-          <button className="settings-close" onClick={onClose}>Done</button>
+          <div className="settings-header-actions">
+            <button
+              className="settings-save-btn"
+              onClick={handleSave}
+              disabled={!dirty || saving}
+              title="Save settings"
+            >
+              <Save size={12} />
+            </button>
+            <button className="settings-close" onClick={onClose}>Back</button>
+          </div>
         </div>
 
         <label>
@@ -63,6 +80,11 @@ export function SettingsPanel({ visible, onClose }: Props) {
         <label>
           <span>Claude directory</span>
           <input value={settings.claude_dir} onChange={e => update("claude_dir", e.target.value)} />
+        </label>
+
+        <label>
+          <span>Theme file</span>
+          <input value={settings.theme_path} onChange={e => update("theme_path", e.target.value)} />
         </label>
 
         <label>
@@ -88,18 +110,7 @@ export function SettingsPanel({ visible, onClose }: Props) {
           </select>
         </label>
 
-        <div className="settings-divider" />
-
-        <label>
-          <span>Theme file</span>
-          <input value={settings.theme_path} onChange={e => update("theme_path", e.target.value)} />
-
-        <div className="settings-footer">
-          <button className="settings-save" onClick={handleSave} disabled={saving}>
-            {saving ? "Saving..." : saved ? "Saved ✓" : "Save"}
-          </button>
-          <span className="settings-hint">Restart to apply changes</span>
-        </div>
+        <span className="settings-hint">Restart to apply changes</span>
       </div>
     </div>
   );

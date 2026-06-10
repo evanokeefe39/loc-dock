@@ -31,6 +31,21 @@
 - **Root cause:** CSS `opacity` on `.app` makes everything transparent including children.
 - **Fix:** Convert hex bg + alpha to `rgba()` background-color instead of opacity.
 
+## P1: Zombie process — dock resists taskkill and can't be closed
+- **Symptom:** After killing via taskkill /F, the process persists. Window stays on screen with no way to close it. Only PowerShell Stop-Process works.
+- **Root cause:** Likely the background data thread (std::thread::spawn in data.rs) holds the process alive even after the main window is destroyed. The DuckDB connection or git subprocess may be blocking.
+- **Fix:** Use a cancellation token / atomic bool checked in the data loop. Ensure clean shutdown on window close. Consider joining the thread on app exit.
+
+## P1: Duplicate windows spawned during dev
+- **Symptom:** Two dock windows appear — one large unstyled (tauri.conf size), one small styled (after frontend loads). Sometimes both persist.
+- **Root cause:** Tauri file watcher restarts the binary when files change, creating a new window while the old one is still alive. The `visible: false` + frontend `show()` pattern adds complexity.
+- **Fix:** Use `--no-watch` in dev. For production, ensure single-instance via Tauri's `single_instance` plugin or mutex.
+
+## P2: Window height from tauri.conf.json not respected
+- **Symptom:** Changing height in tauri.conf.json has no visible effect. Window stays same size.
+- **Root cause:** DPI scaling may be converting logical pixels differently, or the WebView content constrains the window. The programmatic `setSize(LogicalSize)` call was added but needs verification.
+- **Fix:** Debug actual vs expected physical pixel size. May need to account for DPI scale factor.
+
 ## P3: Pin dropdown menu clips at window right edge
 - **Symptom:** Menu items truncated near right edge.
 - **Status:** Partially fixed with `position: fixed; top: 20px; right: 4px`.

@@ -1,8 +1,10 @@
 [package]
-name = "loc-dock-tauri"
+name = "loc-dock"
 version = "0.1.0"
-description = "LOC Dock — floating desktop widget for daily dev metrics"
-authors = ["you"]
+description = "Floating desktop widget that tracks your daily dev metrics at a glance"
+authors = ["Evan O'Keefe"]
+license = "MIT"
+repository = "https://github.com/evanokeefe39/loc-dock"
 edition = "2021"
 
 [lib]
@@ -34,4 +36,3 @@ strip = true
 lto = true
 codegen-units = 1
 opt-level = "s"
-

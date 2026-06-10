@@ -4,44 +4,64 @@ Floating desktop widget that tracks your daily dev metrics at a glance.
 
 ![screenshot](screenshot.png)
 
-![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Tauri](https://img.shields.io/badge/tauri-v2-24C8D8?logo=tauri&logoColor=white)](https://tauri.app)
+[![React](https://img.shields.io/badge/react-19-61DAFB?logo=react&logoColor=white)](https://react.dev)
+[![Rust](https://img.shields.io/badge/rust-2021-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![DuckDB](https://img.shields.io/badge/duckdb-bundled-FFF000?logo=duckdb&logoColor=black)](https://duckdb.org)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue)
 
 ## What it shows
 
-- **LOC changes** — lines added/deleted across all git repos today
-- **Token usage** — Claude Code input, output, cache write, cache read totals
-- **Cost estimate** — dollar cost breakdown with hover tooltip
-- **Session counts** — active and today's Claude Code sessions
+- **LOC changes** -- lines added/deleted across all git repos today
+- **Token usage** -- Claude Code input, output, cache write, cache read totals
+- **Cost estimate** -- dollar cost breakdown with hover tooltip
+- **Session counts** -- active and today's Claude Code sessions
 
 Three chart modes (click to toggle):
-- **LOC** — stacked bar chart of additions (green) and deletions (red)
-- **COST** — cost over time (purple)
-- **TOKENS** — stacked token types: IN (white), OUT (pink), CW (yellow), CR (blue)
+- **LOC** -- stacked bar chart of additions (green) and deletions (red)
+- **COST** -- cost over time (purple)
+- **TOKENS** -- stacked token types: IN (white), OUT (pink), CW (yellow), CR (blue)
+
+## Features
+
+- Always-on-top, borderless, semi-transparent
+- Draggable with snap-to-corner (pin menu for all 4 corners)
+- Resizable -- drag edges/corners to resize, responsive layout collapses at small sizes
+- Day/Week toggle for all stats
+- System tray with Show/Hide/Quit
+- Settings panel (cog icon) for repos dir, claude dir, timezone, day/week start
+- Customizable theme via YAML
+- Auto-creates default theme on first launch
 
 ## Requirements
 
-- Python 3.10+
-- [uv](https://docs.astral.sh/uv/) (handles dependencies automatically)
-- tkinter (included with most Python installations)
-- Git repos in a single directory
+- [Node.js](https://nodejs.org) 18+
+- [Rust](https://rustup.rs) 1.70+
+- Git on PATH
 
-## Usage
+## Quick start
 
-```
-uv run dock.py
-```
-
-Run in the background (returns terminal immediately):
-
-```
-uv run dock.py --bg
+```bash
+git clone https://github.com/evanokeefe39/loc-dock.git
+cd loc-dock/loc-dock-tauri
+npm install
+npm run tauri dev
 ```
 
-Dependencies (`duckdb`, `tzdata`, `pyyaml`, `Pillow`) are installed automatically by `uv`.
+First build takes 3-5 minutes (DuckDB compiles from source). Subsequent builds are fast.
+
+## Build for production
+
+```bash
+npm run tauri build
+```
+
+Produces a native installer in `src-tauri/target/release/bundle/`.
 
 ## Configuration
 
-Set environment variables or copy `.env.example` to `.env` and edit:
+Settings are accessible via the cog icon in the widget, or by editing `~/.config/loc-dock/.env`:
 
 | Variable | Default | Description |
 |---|---|---|
@@ -49,53 +69,56 @@ Set environment variables or copy `.env.example` to `.env` and edit:
 | `LOCDOCK_CLAUDE_DIR` | `~/.claude` | Claude Code data directory |
 | `LOCDOCK_TIMEZONE` | `Europe/Berlin` | IANA timezone for day boundary |
 | `LOCDOCK_DAY_START_HOUR` | `7` | Hour when "today" starts (24h) |
+| `LOCDOCK_WEEK_START_DAY` | `0` | Day week starts (0=Mon, 6=Sun) |
+| `LOCDOCK_THEME_PATH` | `~/.config/loc-dock/theme.yaml` | Path to theme file |
 
 ## Theming
 
-Edit `theme.yaml` to change colors and transparency. All fields are optional — missing keys fall back to defaults.
+Edit `~/.config/loc-dock/theme.yaml` to customize colors and transparency. A default theme is created automatically on first launch. All fields are optional.
 
 ```yaml
-# Window
-alpha: 0.92              # 0.0 = invisible, 1.0 = opaque
-bg: "#1a1a2e"            # main background
-chart_bg: "#12121f"      # chart background
-tooltip_bg: "#222244"    # cost breakdown tooltip
-
-# Text
+alpha: 0.92              # window transparency (0.0-1.0)
+bg: "#202020"            # main background
+chart_bg: "#181818"      # chart background
+tooltip_bg: "#2a2a2a"    # cost tooltip background
 text: "#e0e0e0"          # primary text
-text_dim: "#6b7280"      # secondary text, labels, separators
-axis: "#333350"          # chart axis lines and ticks
-
-# LOC
-loc_add: "#34d399"       # lines added
-loc_del: "#ef4444"       # lines deleted
-
-# Cost
-cost: "#a78bfa"          # cost label and chart bars
-
-# Sessions
-sessions: "#f97316"      # active session count
-
-# Tokens
+text_dim: "#6b7280"      # secondary text, labels
+axis: "#333333"          # chart axis lines
+loc_add: "#34d399"       # lines added (green)
+loc_del: "#ef4444"       # lines deleted (red)
+cost: "#a78bfa"          # cost label and chart (purple)
+sessions: "#f97316"      # active sessions (orange)
 tok_input: "#e0e0e0"     # input tokens
-tok_output: "#f472b6"    # output tokens
-tok_cache_write: "#facc15"  # cache write tokens
-tok_cache_read: "#38bdf8"   # cache read tokens
+tok_output: "#f472b6"    # output tokens (pink)
+tok_cache_write: "#facc15"  # cache write (yellow)
+tok_cache_read: "#38bdf8"   # cache read (blue)
 ```
 
-## Run at startup (Windows)
+You can maintain multiple theme files and switch between them via the settings panel.
 
-`start-hidden.vbs` launches the widget without a console window. To run it automatically on login:
+## Architecture
 
 ```
-powershell -Command "$ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut(\"$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\loc-dock.lnk\"); $sc.TargetPath = 'C:\path\to\loc-dock\start-hidden.vbs'; $sc.WorkingDirectory = 'C:\path\to\loc-dock'; $sc.Save()"
+Rust backend (Tauri)          React frontend
+  config.rs                     App.tsx
+  theme.rs                      TopRow.tsx
+  git.rs ── git log ──>         Chart.tsx (canvas)
+  usage_store.rs ── DuckDB ──>  BottomRow.tsx
+  data.rs ── 60s loop ──>       CostTooltip.tsx
+  commands.rs                   SettingsPanel.tsx
+  tray.rs                       ResizeBorders.tsx
 ```
 
-To remove it, delete the shortcut from `shell:startup`.
+The Rust backend owns all data: git subprocess scanning, DuckDB queries, stat precomputation. It pushes a single `AllStats` JSON blob to the frontend every 60 seconds via Tauri events. The React frontend is a pure renderer with zero data logic.
 
 ## How it works
 
-- Scans all git repos in `LOCDOCK_REPOS_DIR` for commits since day start
-- Reads Claude Code JSONL session files via DuckDB with message-level deduplication
-- Data refreshes every 60s in a background thread; UI updates every 30s
-- Draggable, always-on-top, positions bottom-right above the taskbar
+1. Scans all git repos in `REPOS_DIR` for commits since day/week start
+2. Reads Claude Code JSONL session files via DuckDB with message-level deduplication
+3. Precomputes all stats (tokens, cost, sessions, chart buckets) for both day and week ranges
+4. Pushes updates to the frontend every 60 seconds
+5. Frontend picks the active range and renders -- no queries on toggle
+
+## License
+
+[MIT](LICENSE)

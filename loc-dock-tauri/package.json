@@ -1,7 +1,14 @@
 {
-  "name": "loc-dock-tauri",
+  "name": "loc-dock",
   "private": true,
   "version": "0.1.0",
+  "description": "Floating desktop widget that tracks your daily dev metrics at a glance",
+  "author": "Evan O'Keefe",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/evanokeefe39/loc-dock.git"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",

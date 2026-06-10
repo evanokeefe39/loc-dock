@@ -18,7 +18,10 @@ export function useTheme() {
       setTheme(t);
       const root = document.documentElement;
       for (const [key, value] of Object.entries(t)) {
-        if (key === "alpha") continue;
+        if (key === "alpha") {
+          root.style.setProperty("--alpha", String(value));
+          continue;
+        }
         root.style.setProperty(`--${key.replace(/_/g, "-")}`, value as string);
       }
     }).catch(console.error);

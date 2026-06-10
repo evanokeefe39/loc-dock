@@ -14,14 +14,14 @@
       {
         "label": "main",
         "title": "LOC Dock",
-        "width": 320,
-        "height": 150,
+        "width": 380,
+        "height": 110,
         "decorations": false,
         "alwaysOnTop": true,
         "transparent": true,
         "resizable": false,
         "skipTaskbar": true,
-        "visible": false
+        "visible": true
       }
     ],
     "security": {

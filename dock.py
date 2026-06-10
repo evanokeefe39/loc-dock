@@ -486,7 +486,11 @@ class LocDock(tk.Tk):
         self._git_points: list = []
         self._cost_points: list[tuple[datetime, float]] = []
         self._token_points: list[tuple] = []
-        self._cost_breakdown: dict = {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0}
+        _empty_breakdown = {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0}
+        self._cost_breakdown: dict = {
+            "day": dict(_empty_breakdown),
+            "week": dict(_empty_breakdown),
+        }
         self._time_start_str = "07:00"
         self._time_end_str = "now"
         self._time_start_dt = day_start()
@@ -635,7 +639,7 @@ class LocDock(tk.Tk):
 
     def _show_tooltip(self, event=None):
         self._hide_tooltip()
-        cb = self._cost_breakdown
+        cb = self._cost_breakdown[self._time_range]
         total = sum(cb.values())
         text = (
             f"IN   ${cb['input']:.2f}  @$15/MTok\n"
@@ -886,6 +890,17 @@ class LocDock(tk.Tk):
             log.warning("Token timeline failed: %s", exc)
 
         try:
+            self._cost_breakdown["week"] = self.store.query_cost_breakdown(since_utc)
+        except Exception as exc:
+            log.warning("Cost breakdown (week) failed: %s", exc)
+
+        try:
+            day_utc = day_start().astimezone(timezone.utc)
+            self._cost_breakdown["day"] = self.store.query_cost_breakdown(day_utc)
+        except Exception as exc:
+            log.warning("Cost breakdown (day) failed: %s", exc)
+
+        try:
             self._sess_today, self._sess_active = self.store.count_sessions(since_utc)
         except Exception as exc:
             log.warning("Session count failed: %s", exc)
@@ -922,7 +937,6 @@ class LocDock(tk.Tk):
         self.lbl_deleted.config(text=f"-{total_deleted:,}")
 
         since_utc = since.astimezone(timezone.utc)
-        self._cost_breakdown = self.store.query_cost_breakdown(since_utc)
         t = self.store.query_since(since_utc)
         total = (t["input_tokens"] + t["output_tokens"]
                  + t["cache_creation_input_tokens"] + t["cache_read_input_tokens"])

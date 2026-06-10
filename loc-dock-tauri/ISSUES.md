@@ -1,10 +1,10 @@
 # LOC Dock Tauri — Open Issues
 
-## Bug: Token and cost chart buckets mostly empty
+## Bug: Token and cost chart Y-axis wrong, most data missing from buckets
 - **Severity:** High
-- **Symptom:** Token chart shows zero bars despite 130M+ tokens in bottom row stats. Cost chart shows only a few bars despite $1,682 total.
-- **Root cause:** `parse_ts_offset()` in `data.rs` fails to parse DuckDB timestamp strings. DuckDB `ts::VARCHAR` outputs format like `2026-06-10 14:30:00` but the parser tries `NaiveDateTime::parse_from_str(ts_str, "%Y-%m-%d %H:%M:%S")` which may include fractional seconds or other variations. Most timestamps silently fail to parse, so most buckets stay at zero.
-- **Fix:** Log a sample timestamp from DuckDB to see the actual format, then fix the parser. Alternatively, return timestamps as epoch seconds from DuckDB instead of strings.
+- **Symptom:** Cost chart Y-axis shows $1.00 max when total is $1,682. Token chart shows 73K max when total is 130M+. Some bars render but most data is missing from the bucketed arrays.
+- **Root cause:** `parse_ts_offset()` in `data.rs` silently fails to parse most DuckDB timestamp strings. DuckDB `ts::VARCHAR` likely outputs fractional seconds or a format that `NaiveDateTime::parse_from_str(ts_str, "%Y-%m-%d %H:%M:%S")` can't handle. Most timestamps fail to parse, so most data points are dropped during bucketing. Bottom row stats are correct because they come directly from DuckDB aggregation (query_since), not from the broken bucket functions.
+- **Fix:** Log a sample timestamp from DuckDB to see the actual format, then fix the parser. Alternatively, return timestamps as epoch seconds from DuckDB instead of strings to avoid parsing entirely.
 
 ## Bug: Transparency makes text see-through
 - **Severity:** Medium

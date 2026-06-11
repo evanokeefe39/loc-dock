@@ -76,7 +76,7 @@ html, body {
 }
 
 .toggle-btn {
-  background: var(--chart-bg);
+  background: transparent;
   color: var(--text-dim);
   border: 1px solid var(--text-dim);
   font-size: var(--font-xs);
@@ -110,7 +110,7 @@ html, body {
   position: fixed;
   top: 22px;
   right: 6px;
-  background: var(--chart-bg);
+  background: transparent;
   border: 1px solid var(--text-dim);
   z-index: 100;
   display: flex;
@@ -255,7 +255,7 @@ html, body {
 
 .settings-panel input,
 .settings-panel select {
-  background: var(--chart-bg);
+  background: transparent;
   color: var(--text);
   border: 1px solid var(--text-dim);
   font-family: inherit;

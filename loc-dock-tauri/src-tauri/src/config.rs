@@ -17,6 +17,10 @@ pub struct Settings {
     pub theme_path: PathBuf,
     #[serde(default)]
     pub autostart: bool,
+    #[serde(default = "default_refresh_interval")]
+    pub refresh_interval: u64,
+    #[serde(default = "default_session_idle_timeout")]
+    pub session_idle_timeout: u64,
 }
 
 pub struct Config {
@@ -68,7 +72,6 @@ impl Settings {
 
     fn from_env() -> Self {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        let config_dir = Config::config_dir();
         Settings {
             repos_dir: std::env::var("LOCDOCK_REPOS_DIR")
                 .map(PathBuf::from)
@@ -90,10 +93,12 @@ impl Settings {
                 .min(6),
             theme_path: std::env::var("LOCDOCK_THEME_PATH")
                 .map(PathBuf::from)
-                .unwrap_or_else(|_| config_dir.join("theme.yaml")),
+                .unwrap_or_else(|_| Config::config_dir().join("theme.yaml")),
             autostart: std::env::var("LOCDOCK_AUTOSTART")
                 .map(|s| s == "true" || s == "1")
                 .unwrap_or(false),
+            refresh_interval: 60,
+            session_idle_timeout: 300,
         }
     }
 
@@ -108,15 +113,16 @@ impl Settings {
 impl Default for Settings {
     fn default() -> Self {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        let config_dir = Config::config_dir();
         Settings {
             repos_dir: home.join("repos"),
             claude_dir: home.join(".claude"),
             timezone: "Europe/Berlin".to_string(),
             day_start_hour: 7,
             week_start_day: 0,
-            theme_path: config_dir.join("theme.yaml"),
+            theme_path: Config::config_dir().join("theme.yaml"),
             autostart: false,
+            refresh_interval: 60,
+            session_idle_timeout: 300,
         }
     }
 }
@@ -139,4 +145,12 @@ fn default_day_start_hour() -> u32 {
 
 fn default_theme_path() -> PathBuf {
     Config::config_dir().join("theme.yaml")
+}
+
+fn default_refresh_interval() -> u64 {
+    60
+}
+
+fn default_session_idle_timeout() -> u64 {
+    300
 }

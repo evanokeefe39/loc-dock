@@ -29,8 +29,8 @@ pub struct SettingsData {
 }
 
 #[tauri::command]
-pub fn get_settings(app: AppHandle) -> SettingsData {
-    let config = app.state::<Arc<Config>>();
+pub fn get_settings() -> SettingsData {
+    let config = Config::load();
     SettingsData {
         repos_dir: config.repos_dir.to_string_lossy().to_string(),
         claude_dir: config.claude_dir.to_string_lossy().to_string(),
@@ -57,9 +57,13 @@ pub fn save_settings(app: AppHandle, settings: SettingsData) -> Result<(), Strin
 
     let autostart = app.state::<tauri_plugin_autostart::AutoLaunchManager>();
     if settings.autostart {
-        autostart.enable().map_err(|e| format!("Failed to enable autostart: {}", e))?;
+        if let Err(e) = autostart.enable() {
+            log::error!("Failed to enable autostart: {}", e);
+        }
     } else {
-        autostart.disable().map_err(|e| format!("Failed to disable autostart: {}", e))?;
+        if let Err(e) = autostart.disable() {
+            log::error!("Failed to disable autostart: {}", e);
+        }
     }
 
     Ok(())

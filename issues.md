@@ -13,4 +13,5 @@ Installers are unsigned. Windows SmartScreen and macOS Gatekeeper warn on first 
 
 ## Resolved
 
-(none yet)
+### #4 — Settings don't persist after restart, save breaks after autostart toggle
+Root cause: `get_settings` reads from immutable `Arc<Config>` loaded once at startup — never reflects saved values. Also `save_settings` couples .env write with autostart registry write in one error path, so autostart failure blocks the entire save. Fixed by making `get_settings` read from disk and making autostart failure non-fatal in save.

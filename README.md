@@ -34,13 +34,27 @@ Three chart modes (click to toggle):
 - Customizable theme via YAML
 - Auto-creates default theme on first launch
 
-## Requirements
+## Install
+
+Download the latest installer for your platform from the [Releases page](https://github.com/evanokeefe39/loc-dock/releases).
+
+| Platform | Format |
+|----------|--------|
+| Windows  | `.exe` (NSIS installer) |
+| macOS    | `.dmg` |
+| Linux    | `.AppImage` / `.deb` |
+
+The installers are not code-signed. On Windows, SmartScreen may show a warning — click "More info" then "Run anyway". On macOS, right-click the app and choose "Open" on first launch.
+
+## Development
+
+### Requirements
 
 - [Node.js](https://nodejs.org) 18+
 - [Rust](https://rustup.rs) 1.70+
 - Git on PATH
 
-## Quick start
+### Quick start
 
 ```bash
 git clone https://github.com/evanokeefe39/loc-dock.git
@@ -51,13 +65,22 @@ npm run tauri dev
 
 First build takes 3-5 minutes (DuckDB compiles from source). Subsequent builds are fast.
 
-## Build for production
+### Build for production
 
 ```bash
 npm run tauri build
 ```
 
 Produces a native installer in `src-tauri/target/release/bundle/`.
+
+### Releasing
+
+1. Bump version: `./scripts/bump-version.sh 0.2.0`
+2. Commit: `git commit -am "chore: bump version to 0.2.0"`
+3. Tag: `git tag v0.2.0`
+4. Push: `git push origin master --tags`
+
+GitHub Actions builds installers for all platforms and creates a draft release. Review and publish on the [Releases page](https://github.com/evanokeefe39/loc-dock/releases).
 
 ## Configuration
 

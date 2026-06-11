@@ -56,9 +56,13 @@ pub fn run() {
 
             let autostart = app.state::<tauri_plugin_autostart::AutoLaunchManager>();
             if autostart_enabled {
-                let _ = autostart.enable();
+                if let Err(e) = autostart.enable() {
+                    log::error!("Failed to enable autostart: {}", e);
+                }
             } else {
-                let _ = autostart.disable();
+                if let Err(e) = autostart.disable() {
+                    log::error!("Failed to disable autostart: {}", e);
+                }
             }
 
             data::spawn_data_loop(handle, config.clone(), stats.clone());

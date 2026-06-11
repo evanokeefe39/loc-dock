@@ -57,9 +57,9 @@ pub fn save_settings(app: AppHandle, settings: SettingsData) -> Result<(), Strin
 
     let autostart = app.state::<tauri_plugin_autostart::AutoLaunchManager>();
     if settings.autostart {
-        let _ = autostart.enable();
+        autostart.enable().map_err(|e| format!("Failed to enable autostart: {}", e))?;
     } else {
-        let _ = autostart.disable();
+        autostart.disable().map_err(|e| format!("Failed to disable autostart: {}", e))?;
     }
 
     Ok(())

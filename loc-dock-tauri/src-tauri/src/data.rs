@@ -17,18 +17,18 @@ pub type SharedStats = Arc<RwLock<AllStats>>;
 pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) {
     std::thread::spawn(move || {
         let mut store = UsageStore::new(&config.projects_dir);
-        let tz: Tz = config.timezone.parse().unwrap_or(chrono_tz::Europe::Berlin);
+        let tz: Tz = config.settings.timezone.parse().unwrap_or(chrono_tz::Europe::Berlin);
 
         loop {
             info!("Data refresh starting");
             let now_utc = Utc::now();
             let now_local = now_utc.with_timezone(&tz);
 
-            let week_s = week_start(&now_local, config.day_start_hour, config.week_start_day);
-            let day_s = day_start(&now_local, config.day_start_hour);
+            let week_s = week_start(&now_local, config.settings.day_start_hour, config.settings.week_start_day);
+            let day_s = day_start(&now_local, config.settings.day_start_hour);
 
             let since_iso = week_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
-            let git_points = git::get_git_loc_timeline(&config.repos_dir, &since_iso);
+            let git_points = git::get_git_loc_timeline(&config.settings.repos_dir, &since_iso);
 
             store.load();
 
@@ -53,7 +53,7 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
                 &week_utc_str,
                 &day_utc_str,
                 &active_str,
-                config.day_start_hour,
+                config.settings.day_start_hour,
             );
 
             if let Ok(mut s) = stats.write() {

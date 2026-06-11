@@ -21,9 +21,9 @@ pub fn run() {
     env_logger::init();
 
     let config = Arc::new(Config::load());
-    let theme = Theme::load(&config.theme_path);
+    let theme = Theme::load(&config.settings.theme_path);
     let stats: SharedStats = Arc::new(RwLock::new(AllStats::default()));
-    let autostart_enabled = config.autostart;
+    let autostart_enabled = config.settings.autostart;
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())

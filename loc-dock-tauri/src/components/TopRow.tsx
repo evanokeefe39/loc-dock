@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect } from "react";
 import { Pin, X, Info, Settings } from "lucide-react";
 import { RangeStats, TimeRange, ChartMode } from "../lib/types";
 import { fmtCost, fmtLoc } from "../lib/format";

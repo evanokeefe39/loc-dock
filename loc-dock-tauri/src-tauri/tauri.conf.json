@@ -38,6 +38,21 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "publisher": "Evan O'Keefe",
+    "copyright": "Copyright (c) 2026 Evan O'Keefe",
+    "category": "Utility",
+    "shortDescription": "Floating desktop widget that tracks your daily dev metrics",
+    "longDescription": "LOC Dock is a floating desktop widget that tracks lines of code, Claude Code token usage, cost estimates, and active sessions at a glance.",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
+    "linux": {
+      "deb": {
+        "depends": []
+      }
+    }
   }
 }

@@ -40,7 +40,7 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
                 .with_timezone(&Utc)
                 .format("%Y-%m-%d %H:%M:%S")
                 .to_string();
-            let active_str = (Utc::now() - Duration::minutes(30))
+            let active_str = (Utc::now() - Duration::minutes(5))
                 .format("%Y-%m-%d %H:%M:%S")
                 .to_string();
 
@@ -106,6 +106,7 @@ fn build_all_stats(
     let time_labels_day = compute_time_labels(day_s, now, false, day_start_hour);
 
     AllStats {
+        ready: true,
         day: RangeStats {
             loc_added: day_loc.0,
             loc_deleted: day_loc.1,

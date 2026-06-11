@@ -11,6 +11,8 @@ interface Settings {
   week_start_day: number;
   theme_path: string;
   autostart: boolean;
+  refresh_interval: number;
+  session_idle_timeout: number;
 }
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
@@ -85,13 +87,24 @@ export function SettingsPanel({ visible, onClose }: Props) {
     setSaved(false);
   };
 
+  const VISUAL_ONLY: (keyof Settings)[] = ["theme_path", "autostart"];
+
+  const needsRestart = () => {
+    if (!original.current) return false;
+    const prev = JSON.parse(original.current) as Settings;
+    return Object.keys(settings!).some(
+      k => !VISUAL_ONLY.includes(k as keyof Settings) && JSON.stringify((settings as Record<string, unknown>)[k]) !== JSON.stringify((prev as Record<string, unknown>)[k])
+    );
+  };
+
   const handleSave = async () => {
     setSaving(true);
     try {
       await invoke("save_settings", { settings });
+      const restart = needsRestart();
       original.current = JSON.stringify(settings);
       setDirty(false);
-      setSaved(true);
+      setSaved(restart);
     } catch (e) {
       console.error("Save failed:", e);
     }
@@ -159,6 +172,28 @@ export function SettingsPanel({ visible, onClose }: Props) {
               <option key={i} value={i}>{d}</option>
             ))}
           </select>
+        </label>
+
+        <label>
+          <span>Refresh interval (seconds)</span>
+          <input
+            type="number"
+            min={10}
+            max={600}
+            value={settings.refresh_interval}
+            onChange={e => update("refresh_interval", Math.max(10, parseInt(e.target.value) || 60))}
+          />
+        </label>
+
+        <label title="Sessions with no activity within this period are considered inactive">
+          <span>Session idle timeout (seconds)</span>
+          <input
+            type="number"
+            min={30}
+            max={3600}
+            value={settings.session_idle_timeout}
+            onChange={e => update("session_idle_timeout", Math.max(30, parseInt(e.target.value) || 300))}
+          />
         </label>
 
         <label className="settings-checkbox">

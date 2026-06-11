@@ -49,8 +49,6 @@ export function Chart({ stats, mode, range, theme }: Props) {
     const h = rect.height;
 
     ctx.clearRect(0, 0, w, h);
-    ctx.fillStyle = themeRef.current.chart_bg;
-    ctx.fillRect(0, 0, w, h);
 
     const s = statsRef.current;
     if (!s || !s.ready) {

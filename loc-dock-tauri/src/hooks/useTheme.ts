@@ -21,11 +21,14 @@ export function useTheme() {
         if (key === "alpha") continue;
         root.style.setProperty(`--${key.replace(/_/g, "-")}`, value as string);
       }
-      const hex = t.bg;
-      const r = parseInt(hex.slice(1, 3), 16);
-      const g = parseInt(hex.slice(3, 5), 16);
-      const b = parseInt(hex.slice(5, 7), 16);
-      root.style.setProperty("--bg-alpha", `rgba(${r},${g},${b},${t.alpha})`);
+      const hexToRgba = (hex: string, a: number) => {
+        const r = parseInt(hex.slice(1, 3), 16);
+        const g = parseInt(hex.slice(3, 5), 16);
+        const b = parseInt(hex.slice(5, 7), 16);
+        return `rgba(${r},${g},${b},${a})`;
+      };
+      root.style.setProperty("--bg-alpha", hexToRgba(t.bg, t.alpha));
+      root.style.setProperty("--chart-bg-alpha", hexToRgba(t.chart_bg, t.alpha));
 
     }).catch(console.error);
   }, []);

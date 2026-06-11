@@ -93,7 +93,7 @@ export function SettingsPanel({ visible, onClose }: Props) {
     if (!original.current) return false;
     const prev = JSON.parse(original.current) as Settings;
     return Object.keys(settings!).some(
-      k => !VISUAL_ONLY.includes(k as keyof Settings) && JSON.stringify((settings as Record<string, unknown>)[k]) !== JSON.stringify((prev as Record<string, unknown>)[k])
+      k => !VISUAL_ONLY.includes(k as keyof Settings) && JSON.stringify(settings![k as keyof Settings]) !== JSON.stringify(prev[k as keyof Settings])
     );
   };
 

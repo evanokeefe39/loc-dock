@@ -121,15 +121,46 @@ You can maintain multiple theme files and switch between them via the settings p
 
 ## Architecture
 
-```
-Rust backend (Tauri)          React frontend
-  config.rs                     App.tsx
-  theme.rs                      TopRow.tsx
-  git.rs ── git log ──>         Chart.tsx (canvas)
-  usage_store.rs ── DuckDB ──>  BottomRow.tsx
-  data.rs ── 60s loop ──>       CostTooltip.tsx
-  commands.rs                   SettingsPanel.tsx
-  tray.rs                       ResizeBorders.tsx
+```mermaid
+flowchart LR
+    subgraph Data Sources
+        GIT[Git repos]
+        JSONL[Claude Code JSONL]
+        ENV[.env config]
+    end
+
+    subgraph Rust Backend
+        config[config.rs]
+        theme[theme.rs]
+        git[git.rs]
+        usage[usage_store.rs]
+        data[data.rs]
+        commands[commands.rs]
+        tray[tray.rs]
+    end
+
+    subgraph React Frontend
+        App[App.tsx]
+        TopRow[TopRow.tsx]
+        Chart[Chart.tsx]
+        BottomRow[BottomRow.tsx]
+        Tooltip[CostTooltip.tsx]
+        Settings[SettingsPanel.tsx]
+    end
+
+    GIT -- git log --> git
+    JSONL -- DuckDB --> usage
+    ENV --> config
+
+    git --> data
+    usage --> data
+    config --> data
+    theme --> App
+
+    data -- "AllStats JSON (60s)" --> App
+    App --> TopRow & Chart & BottomRow & Tooltip
+    commands <-- "Tauri IPC" --> Settings
+    tray -. show/hide .-> App
 ```
 
 The Rust backend owns all data: git subprocess scanning, DuckDB queries, stat precomputation. It pushes a single `AllStats` JSON blob to the frontend every 60 seconds via Tauri events. The React frontend is a pure renderer with zero data logic.

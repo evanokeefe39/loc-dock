@@ -1,4 +1,5 @@
 export interface AllStats {
+  ready: boolean;
   day: RangeStats;
   week: RangeStats;
   git_buckets_day: [number, number][];

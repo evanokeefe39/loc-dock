@@ -65,7 +65,7 @@ function App() {
         onShowTooltip={setTooltipVisible}
       />
       <Chart stats={stats} mode={mode} range={range} theme={theme} />
-      <BottomRow tokens={currentStats?.tokens ?? null} loading={!stats} />
+      <BottomRow tokens={currentStats?.tokens ?? null} loading={!stats || !stats.ready} />
       <CostTooltip breakdown={currentStats?.cost_breakdown ?? null} visible={tooltipVisible} />
       <SettingsPanel visible={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <ResizeBorders />

@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct AllStats {
+    pub ready: bool,
     pub day: RangeStats,
     pub week: RangeStats,
     pub git_buckets_day: Vec<(i64, i64)>,

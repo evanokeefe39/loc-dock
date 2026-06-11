@@ -1,6 +1,8 @@
-import { useRef, useEffect, useCallback } from "react";
+import { useRef, useEffect, useCallback, useState } from "react";
 import { AllStats, ChartMode, TimeRange, Theme } from "../lib/types";
 import { drawLocChart, drawCostChart, drawTokenChart } from "../lib/chart";
+
+const SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
 
 interface Props {
   stats: AllStats | null;
@@ -15,11 +17,22 @@ export function Chart({ stats, mode, range, theme }: Props) {
   const modeRef = useRef(mode);
   const rangeRef = useRef(range);
   const themeRef = useRef(theme);
+  const [spinnerFrame, setSpinnerFrame] = useState(0);
+  const spinnerFrameRef = useRef(0);
 
   statsRef.current = stats;
   modeRef.current = mode;
   rangeRef.current = range;
   themeRef.current = theme;
+  spinnerFrameRef.current = spinnerFrame;
+
+  const loading = !stats || !stats.ready;
+
+  useEffect(() => {
+    if (!loading) return;
+    const id = setInterval(() => setSpinnerFrame(f => (f + 1) % SPINNER_FRAMES.length), 80);
+    return () => clearInterval(id);
+  }, [loading]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -40,11 +53,11 @@ export function Chart({ stats, mode, range, theme }: Props) {
     ctx.fillRect(0, 0, w, h);
 
     const s = statsRef.current;
-    if (!s) {
+    if (!s || !s.ready) {
       ctx.font = "12px 'Segoe UI'";
       ctx.fillStyle = themeRef.current.text_dim;
       ctx.textAlign = "center";
-      ctx.fillText("loading…", w / 2, h / 2);
+      ctx.fillText(`${SPINNER_FRAMES[spinnerFrameRef.current]} loading...`, w / 2, h / 2);
       return;
     }
 
@@ -64,7 +77,7 @@ export function Chart({ stats, mode, range, theme }: Props) {
 
   useEffect(() => {
     draw();
-  }, [stats, mode, range, theme, draw]);
+  }, [stats, mode, range, theme, draw, spinnerFrame]);
 
   useEffect(() => {
     const canvas = canvasRef.current;

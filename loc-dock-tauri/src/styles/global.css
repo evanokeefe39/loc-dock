@@ -81,14 +81,12 @@ html, body {
 }
 
 .summary-cards {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 280px));
   gap: 4px;
 }
 
 .summary-card {
-  flex: 0 1 calc(50% - 2px);
-  min-width: 120px;
   border: 1px solid rgba(255,255,255,0.08);
   border-radius: 3px;
   padding: 4px 6px;

@@ -1,7 +1,7 @@
 {
   "name": "loc-dock",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Floating desktop widget that tracks your daily dev metrics at a glance",
   "author": "Evan O'Keefe",
   "license": "MIT",

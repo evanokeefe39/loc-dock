@@ -1,9 +1,12 @@
 use crate::config::{Config, Settings};
 use crate::data::SharedStats;
+use crate::git_cache::GitCache;
+use crate::job_log::{self, LogEntry};
 use crate::summary::{self, SummaryData};
 use crate::task_queue::{ActiveTask, TaskQueue};
 use crate::theme::Theme;
 use crate::types::AllStats;
+use crate::usage_store::UsageStore;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, Window};
 
@@ -57,6 +60,40 @@ pub fn restart_app(app: AppHandle) {
 #[tauri::command]
 pub fn get_active_tasks(app: AppHandle) -> Vec<ActiveTask> {
     app.state::<TaskQueue>().active_tasks()
+}
+
+#[tauri::command]
+pub fn reset_git_cache(app: AppHandle) -> Result<(), String> {
+    let config = app.state::<Arc<Config>>();
+    GitCache::reset(&config.settings.git_cache_dir)?;
+    job_log::log_ok("git_cache", "Git cache reset");
+    Ok(())
+}
+
+#[tauri::command]
+pub fn reset_usage_cache(app: AppHandle) -> Result<(), String> {
+    let config = app.state::<Arc<Config>>();
+    UsageStore::reset(&config.settings.usage_cache_dir)?;
+    job_log::log_ok("usage_cache", "Usage cache reset");
+    Ok(())
+}
+
+#[tauri::command]
+pub fn reset_summary_cache(app: AppHandle) -> Result<(), String> {
+    let config = app.state::<Arc<Config>>();
+    summary::reset_summaries(&config)
+}
+
+#[tauri::command]
+pub fn get_job_logs(app: AppHandle) -> Vec<LogEntry> {
+    let config = app.state::<Arc<Config>>();
+    job_log::read_logs(&config.settings.log_dir, 100)
+}
+
+#[tauri::command]
+pub fn clear_job_logs(app: AppHandle) -> Result<(), String> {
+    let config = app.state::<Arc<Config>>();
+    job_log::clear_logs(&config.settings.log_dir)
 }
 
 #[tauri::command]

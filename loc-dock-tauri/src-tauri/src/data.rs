@@ -1,6 +1,8 @@
 use crate::time_utils;
 use crate::config::Config;
 use crate::git::{self, GitPoint};
+use crate::git_cache;
+use crate::job_log;
 use crate::pricing;
 use crate::task_queue::TaskQueue;
 use crate::types::*;
@@ -17,11 +19,43 @@ pub type SharedStats = Arc<RwLock<AllStats>>;
 
 pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) {
     std::thread::spawn(move || {
-        let mut store = UsageStore::new(&config.projects_dir);
+        let mut store = UsageStore::new(&config.projects_dir, &config.settings.usage_cache_dir);
         let tz: Tz = config.settings.timezone.parse().unwrap_or(chrono_tz::UTC);
         let queue = app.state::<TaskQueue>();
 
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        // Emit cached data immediately so the UI renders in <1s
+        {
+            let now_local = Utc::now().with_timezone(&tz);
+            let week_s = time_utils::week_start(&now_local, config.settings.day_start_hour, config.settings.week_start_day);
+            let day_s = time_utils::day_start(&now_local, config.settings.day_start_hour);
+            let since_iso = week_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
+
+            let cache = git_cache::GitCache::new(&config.settings.git_cache_dir);
+            let git_points = cache.query_since(&since_iso);
+
+            if !git_points.is_empty() || store.is_initialized() {
+                let week_utc_str = week_s.with_timezone(&Utc).format("%Y-%m-%d %H:%M:%S").to_string();
+                let day_utc_str = day_s.with_timezone(&Utc).format("%Y-%m-%d %H:%M:%S").to_string();
+                let active_str = (Utc::now() - Duration::seconds(config.settings.session_idle_timeout as i64))
+                    .format("%Y-%m-%d %H:%M:%S").to_string();
+
+                let all = build_all_stats(
+                    &git_points, &store, &week_s, &day_s, &now_local,
+                    &week_utc_str, &day_utc_str, &active_str,
+                    config.settings.day_start_hour,
+                );
+                if let Ok(mut s) = stats.write() {
+                    *s = all.clone();
+                }
+                let _ = app.emit("stats-update", &all);
+                let msg = format!("Instant emit from cache ({} git points, usage_init={})", git_points.len(), store.is_initialized());
+                info!("{}", msg);
+                job_log::log_ok("data", &msg);
+            } else {
+                info!("No cached data available, waiting for first refresh");
+                job_log::log_ok("data", "No cached data, waiting for first refresh");
+            }
+        }
 
         loop {
             let cycle_start = std::time::Instant::now();
@@ -40,9 +74,11 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
 
             let repos_dir = config.settings.repos_dir.clone();
             let since_clone = since_iso.clone();
+            let git_cache_dir = config.settings.git_cache_dir.clone();
             let git_handle = std::thread::spawn(move || {
                 let t = std::time::Instant::now();
-                let result = git::get_git_loc_timeline(&repos_dir, &since_clone);
+                let cache = git_cache::GitCache::new(&git_cache_dir);
+                let result = git::get_git_loc_timeline(&repos_dir, &since_clone, &cache);
                 (result, t.elapsed())
             });
 
@@ -95,6 +131,7 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
                 stats_ms
             );
             info!("{}", timing);
+            job_log::log_ok("data", &timing);
             crate::summary::perf_log_from(&config.config_dir, &timing);
 
             std::thread::sleep(std::time::Duration::from_secs(config.settings.refresh_interval.max(10)));

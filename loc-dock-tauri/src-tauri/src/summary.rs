@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::job_log;
 use crate::task_queue::TaskQueue;
 use crate::time_utils;
 use chrono::Utc;
@@ -55,6 +56,34 @@ fn count_prs(repos: &[RepoSummary]) -> usize {
     repos.iter().map(|r| r.prs.len()).sum()
 }
 
+/// Build RepoSummary list from fresh commits, overlaying cached highlights.
+/// PRs and commit counts always come from current git data.
+/// Highlights come from cache when available, empty otherwise (backfill).
+fn build_repos(
+    commits: &HashMap<String, Vec<(String, String)>>,
+    cached: &[RepoSummary],
+) -> Vec<RepoSummary> {
+    let highlight_map: HashMap<&str, &[String]> = cached
+        .iter()
+        .map(|r| (r.name.as_str(), r.highlights.as_slice()))
+        .collect();
+
+    let mut repos: Vec<RepoSummary> = commits
+        .iter()
+        .map(|(name, cs)| RepoSummary {
+            name: name.clone(),
+            commits: cs.len(),
+            prs: extract_prs(cs),
+            highlights: highlight_map
+                .get(name.as_str())
+                .map(|h| h.to_vec())
+                .unwrap_or_default(),
+        })
+        .collect();
+    repos.sort_by(|a, b| b.commits.cmp(&a.commits));
+    repos
+}
+
 pub fn perf_log_from(config_dir: &Path, msg: &str) {
     perf_log(config_dir, msg);
 }
@@ -73,6 +102,7 @@ struct SummaryStore {
 
 impl SummaryStore {
     fn new(config_dir: &Path) -> Self {
+        let _ = std::fs::create_dir_all(config_dir);
         let db_path = config_dir.join("summaries.db");
         let con = Connection::open(db_path).expect("failed to open summaries.db");
         con.execute_batch(
@@ -318,13 +348,13 @@ fn summarize_repos(
         let highlights = match call_llm(api_key, endpoint, model, REPO_PROMPT, &content) {
             Ok(text) => {
                 let cleaned = text.trim().trim_start_matches("```json").trim_end_matches("```").trim();
+                job_log::log_ok("summary", &format!("LLM response for {}: {} chars", repo, cleaned.len()));
                 serde_json::from_str::<Vec<String>>(cleaned).unwrap_or_else(|_| {
-                    // Fallback: split by newline and take first few
                     cleaned.lines().take(4).map(|l| l.trim().trim_matches('"').to_string()).collect()
                 })
             }
-            Err(_) => {
-                // Fallback: use first few commit messages as highlights
+            Err(e) => {
+                job_log::log_err("summary", &format!("LLM failed for {}: {}", repo, e));
                 msgs.iter().take(3).map(|m| m.to_string()).collect()
             }
         };
@@ -363,7 +393,7 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
             .timezone
             .parse()
             .unwrap_or(chrono_tz::UTC);
-        let store = if has_key { Some(SummaryStore::new(&config.config_dir)) } else { None };
+        let store = if has_key { Some(SummaryStore::new(&config.settings.summary_cache_dir)) } else { None };
         let debounce_secs = config.settings.summary_debounce_secs.max(60);
         let mut last_call: Option<Instant> = None;
         let queue = app.state::<TaskQueue>();
@@ -399,12 +429,6 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
             queue.complete(collect_id);
             let _ = app.emit("tasks-changed", ());
 
-            let empty_repos = |commits: &HashMap<String, Vec<(String, String)>>| -> Vec<RepoSummary> {
-                commits.iter().map(|(name, cs)| RepoSummary {
-                    name: name.clone(), commits: cs.len(), prs: extract_prs(cs), highlights: vec![],
-                }).collect()
-            };
-
             let day_cached: Vec<RepoSummary> = store.as_ref()
                 .and_then(|s| s.get_summary(&day_date, "day"))
                 .and_then(|json| serde_json::from_str(&json).ok())
@@ -414,23 +438,31 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
                 .and_then(|json| serde_json::from_str(&json).ok())
                 .unwrap_or_default();
 
+            let day_display = build_repos(&day_commits, &day_cached);
+            let week_display = build_repos(&week_commits, &week_cached);
+
             let day_loading = has_key && !day_commits.is_empty() && day_cached.is_empty();
             let week_loading = has_key && !week_commits.is_empty() && week_cached.is_empty();
 
             let _ = app.emit("summary-update", &SummaryData {
-                day_repos: if day_cached.is_empty() { empty_repos(&day_commits) } else { day_cached.clone() },
+                day_prs: count_prs(&day_display),
+                day_repos: day_display,
                 day_repo_count: day_total_repos,
                 day_commits: day_total_commits,
-                day_prs: count_prs(&day_cached),
-                week_repos: if week_cached.is_empty() { empty_repos(&week_commits) } else { week_cached.clone() },
+                week_prs: count_prs(&week_display),
+                week_repos: week_display,
                 week_repo_count: week_total_repos,
                 week_commits: week_total_commits,
-                week_prs: count_prs(&week_cached),
                 loading: day_loading || week_loading,
                 no_api_key: !has_key,
             });
 
             if let (Some(ref key), Some(ref store)) = (&api_key, &store) {
+                let debounce_ok = last_call
+                    .map(|t| t.elapsed().as_secs() >= debounce_secs)
+                    .unwrap_or(true);
+                let mut called_llm = false;
+
                 for (scope, scope_date, commits, label) in [
                     ("day", &day_date, &day_commits, "day"),
                     ("week", &week_date, &week_commits, "week"),
@@ -438,9 +470,6 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
                     let current_shas = latest_shas(commits);
                     let stored_shas = store.get_repo_shas(scope_date, scope);
                     let needs_update = current_shas != stored_shas && !commits.is_empty();
-                    let debounce_ok = last_call
-                        .map(|t| t.elapsed().as_secs() >= debounce_secs)
-                        .unwrap_or(true);
 
                     if needs_update && debounce_ok {
                         let total = commits.values().map(|v| v.len()).sum::<usize>();
@@ -454,9 +483,7 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
 
                         let json = serde_json::to_string(&repo_summaries).unwrap_or_default();
                         store.save_summary(scope_date, scope, &json, &current_shas);
-                        if scope == "day" {
-                            last_call = Some(Instant::now());
-                        }
+                        called_llm = true;
 
                         queue.complete(llm_id);
                         let _ = app.emit("tasks-changed", ());
@@ -468,16 +495,22 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
                         info!("Repo summaries ({}) updated in {}ms", label, llm_ms);
                     }
                 }
+
+                if called_llm {
+                    last_call = Some(Instant::now());
+                }
             }
 
-            let day_final: Vec<RepoSummary> = store.as_ref()
+            let day_final_cached: Vec<RepoSummary> = store.as_ref()
                 .and_then(|s| s.get_summary(&day_date, "day"))
                 .and_then(|json| serde_json::from_str(&json).ok())
-                .unwrap_or_else(|| empty_repos(&day_commits));
-            let week_final: Vec<RepoSummary> = store.as_ref()
+                .unwrap_or_default();
+            let week_final_cached: Vec<RepoSummary> = store.as_ref()
                 .and_then(|s| s.get_summary(&week_date, "week"))
                 .and_then(|json| serde_json::from_str(&json).ok())
-                .unwrap_or_else(|| empty_repos(&week_commits));
+                .unwrap_or_default();
+            let day_final = build_repos(&day_commits, &day_final_cached);
+            let week_final = build_repos(&week_commits, &week_final_cached);
 
             let data = SummaryData {
                 day_prs: count_prs(&day_final),
@@ -503,6 +536,15 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
             ));
         }
     });
+}
+
+pub fn reset_summaries(config: &Config) -> Result<(), String> {
+    let db_path = config.settings.summary_cache_dir.join("summaries.db");
+    if db_path.exists() {
+        std::fs::remove_file(&db_path).map_err(|e| e.to_string())?;
+    }
+    job_log::log_ok("summary", "Summary cache reset");
+    Ok(())
 }
 
 /// Tauri command to get current summary state on demand.
@@ -532,15 +574,9 @@ pub fn get_current_summary(config: &Config) -> SummaryData {
     let day_date = day_s.format("%Y-%m-%d").to_string();
     let week_date = week_s.format("%Y-%m-%d").to_string();
 
-    let empty_repos = |commits: &HashMap<String, Vec<(String, String)>>| -> Vec<RepoSummary> {
-        commits.iter().map(|(name, cs)| RepoSummary {
-            name: name.clone(), commits: cs.len(), prs: extract_prs(cs), highlights: vec![],
-        }).collect()
-    };
-
     let load_cached = |date: &str, scope: &str| -> Vec<RepoSummary> {
         if !has_key { return Vec::new(); }
-        let db_path = config.config_dir.join("summaries.db");
+        let db_path = config.settings.summary_cache_dir.join("summaries.db");
         if !db_path.exists() { return Vec::new(); }
         Connection::open(&db_path).ok()
             .and_then(|con| {
@@ -553,9 +589,8 @@ pub fn get_current_summary(config: &Config) -> SummaryData {
 
     let day_cached = load_cached(&day_date, "day");
     let week_cached = load_cached(&week_date, "week");
-
-    let day_repos = if day_cached.is_empty() { empty_repos(&day_commits) } else { day_cached };
-    let week_repos = if week_cached.is_empty() { empty_repos(&week_commits) } else { week_cached };
+    let day_repos = build_repos(&day_commits, &day_cached);
+    let week_repos = build_repos(&week_commits, &week_cached);
 
     SummaryData {
         day_prs: count_prs(&day_repos),

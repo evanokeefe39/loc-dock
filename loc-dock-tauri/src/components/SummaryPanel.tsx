@@ -16,15 +16,17 @@ function formatHighlight(text: string): ReactNode {
 interface Props {
   summary: SummaryData;
   range: TimeRange;
+  hideNoPrs?: boolean;
 }
 
-export function SummaryPanel({ summary, range }: Props) {
+export function SummaryPanel({ summary, range, hideNoPrs }: Props) {
   const [height, setHeight] = useState(100);
   const dragging = useRef(false);
   const startY = useRef(0);
   const startH = useRef(0);
 
-  const repos = range === "day" ? summary.day_repos : summary.week_repos;
+  const allRepos = range === "day" ? summary.day_repos : summary.week_repos;
+  const repos = hideNoPrs ? allRepos.filter(r => r.prs.length > 0) : allRepos;
   const repoCount = range === "day" ? summary.day_repo_count : summary.week_repo_count;
   const commits = range === "day" ? summary.day_commits : summary.week_commits;
   const prs = range === "day" ? summary.day_prs : summary.week_prs;
@@ -77,7 +79,9 @@ export function SummaryPanel({ summary, range }: Props) {
                 </div>
                 {repo.prs.length > 0 && (
                   <div className="card-prs">
-                    {repo.prs.map(pr => <span key={pr} className="pr-badge">{pr}</span>)}
+                    {repo.prs.map((pr, i) => (
+                      <span key={pr}><span className="pr-badge">{pr}</span>{i < repo.prs.length - 1 ? ", " : ""}</span>
+                    ))}
                   </div>
                 )}
                 {repo.highlights.length > 0 && (

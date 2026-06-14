@@ -19,7 +19,19 @@ interface Settings {
   llm_model: string;
   summary_debounce_secs: number;
   summary_exclude_pattern: string;
+  hide_repos_without_prs: boolean;
+  log_dir: string;
+  git_cache_dir: string;
+  usage_cache_dir: string;
+  summary_cache_dir: string;
 }
+
+const DATA_ROWS: { key: keyof Settings; label: string; cmd: string; what: string }[] = [
+  { key: "git_cache_dir",     label: "Git cache",     cmd: "reset_git_cache",     what: "git cache" },
+  { key: "usage_cache_dir",   label: "Usage cache",   cmd: "reset_usage_cache",   what: "usage cache" },
+  { key: "summary_cache_dir", label: "Summary cache",  cmd: "reset_summary_cache", what: "summary cache" },
+  { key: "log_dir",           label: "Job logs",       cmd: "clear_job_logs",      what: "job logs" },
+];
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
@@ -70,6 +82,7 @@ export function SettingsPanel({ visible, onClose }: Props) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
+  const [confirmReset, setConfirmReset] = useState<string | null>(null);
   const original = useRef<string>("");
 
   useEffect(() => {
@@ -78,7 +91,7 @@ export function SettingsPanel({ visible, onClose }: Props) {
         setSettings(s);
         original.current = JSON.stringify(s);
         setDirty(false);
-              }).catch(console.error);
+      }).catch(console.error);
     }
   }, [visible]);
 
@@ -88,9 +101,9 @@ export function SettingsPanel({ visible, onClose }: Props) {
     const updated = { ...settings, [field]: value };
     setSettings(updated);
     setDirty(JSON.stringify(updated) !== original.current);
-      };
+  };
 
-  const VISUAL_ONLY: (keyof Settings)[] = ["theme_path", "autostart"];
+  const VISUAL_ONLY: (keyof Settings)[] = ["theme_path", "autostart", "hide_repos_without_prs"];
 
   const needsRestart = () => {
     if (!original.current) return false;
@@ -116,6 +129,8 @@ export function SettingsPanel({ visible, onClose }: Props) {
     setSaving(false);
   };
 
+  const activeRow = confirmReset ? DATA_ROWS.find(r => r.cmd === confirmReset) : null;
+
   return (
     <div className="settings-overlay">
       <div className="settings-panel">
@@ -133,6 +148,9 @@ export function SettingsPanel({ visible, onClose }: Props) {
             <button className="settings-close" onClick={onClose}>Back</button>
           </div>
         </div>
+
+        {/* ── General ── */}
+        <div className="settings-section-heading">General</div>
 
         <label>
           <span>Repos directory</span>
@@ -210,7 +228,55 @@ export function SettingsPanel({ visible, onClose }: Props) {
           <span>Start on login</span>
         </label>
 
-        <div className="settings-divider" />
+        {/* ── Data ── */}
+        <div className="settings-section-heading">Data</div>
+
+        {DATA_ROWS.map(row => (
+          <div key={row.key} className="settings-data-row">
+            <label>
+              <span>{row.label}</span>
+              <input
+                value={settings[row.key] as string}
+                onChange={e => update(row.key, e.target.value)}
+              />
+            </label>
+            <button
+              className="settings-inline-reset"
+              onClick={() => setConfirmReset(row.cmd)}
+              title={`Clear ${row.what}`}
+            >
+              clear
+            </button>
+          </div>
+        ))}
+
+        {activeRow && (
+          <div className="settings-confirm-modal">
+            <span>Delete {activeRow.what} and restart?</span>
+            <div className="settings-confirm-actions">
+              <button
+                className="settings-action-btn settings-action-danger"
+                onClick={async () => {
+                  try {
+                    await invoke(activeRow.cmd);
+                    setConfirmReset(null);
+                    invoke("restart_app").catch(() => getCurrentWindow().close());
+                  } catch (e) {
+                    console.error("Reset failed:", e);
+                  }
+                }}
+              >
+                Yes, reset
+              </button>
+              <button className="settings-action-btn" onClick={() => setConfirmReset(null)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ── AI Summaries ── */}
+        <div className="settings-section-heading">AI Summaries</div>
 
         <label className="settings-checkbox">
           <input
@@ -218,7 +284,7 @@ export function SettingsPanel({ visible, onClose }: Props) {
             checked={settings.summary_enabled}
             onChange={e => update("summary_enabled", e.target.checked)}
           />
-          <span>AI commit summaries</span>
+          <span>Enable AI commit summaries</span>
         </label>
 
         <label title="API key for an OpenAI-compatible LLM provider (e.g. DeepSeek, OpenAI, OpenRouter)">
@@ -267,6 +333,15 @@ export function SettingsPanel({ visible, onClose }: Props) {
             onChange={e => update("summary_exclude_pattern", e.target.value)}
             placeholder="^(chore|docs|style|ci):"
           />
+        </label>
+
+        <label className="settings-checkbox">
+          <input
+            type="checkbox"
+            checked={settings.hide_repos_without_prs}
+            onChange={e => update("hide_repos_without_prs", e.target.checked)}
+          />
+          <span>Hide repos without PRs</span>
         </label>
 
       </div>

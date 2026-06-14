@@ -33,6 +33,16 @@ pub struct Settings {
     pub summary_debounce_secs: u64,
     #[serde(default = "default_summary_exclude_pattern")]
     pub summary_exclude_pattern: String,
+    #[serde(default)]
+    pub hide_repos_without_prs: bool,
+    #[serde(default = "default_log_dir")]
+    pub log_dir: PathBuf,
+    #[serde(default = "default_git_cache_dir")]
+    pub git_cache_dir: PathBuf,
+    #[serde(default = "default_usage_cache_dir")]
+    pub usage_cache_dir: PathBuf,
+    #[serde(default = "default_summary_cache_dir")]
+    pub summary_cache_dir: PathBuf,
 }
 
 pub struct Config {
@@ -123,6 +133,11 @@ impl Settings {
                 .unwrap_or_else(|_| "deepseek-chat".to_string()),
             summary_debounce_secs: 300,
             summary_exclude_pattern: default_summary_exclude_pattern(),
+            hide_repos_without_prs: false,
+            log_dir: default_log_dir(),
+            git_cache_dir: default_git_cache_dir(),
+            usage_cache_dir: default_usage_cache_dir(),
+            summary_cache_dir: default_summary_cache_dir(),
         }
     }
 
@@ -153,6 +168,11 @@ impl Default for Settings {
             llm_model: "deepseek-chat".to_string(),
             summary_debounce_secs: 300,
             summary_exclude_pattern: default_summary_exclude_pattern(),
+            hide_repos_without_prs: false,
+            log_dir: default_log_dir(),
+            git_cache_dir: default_git_cache_dir(),
+            usage_cache_dir: default_usage_cache_dir(),
+            summary_cache_dir: default_summary_cache_dir(),
         }
     }
 }
@@ -203,4 +223,20 @@ fn default_summary_debounce_secs() -> u64 {
 
 fn default_summary_exclude_pattern() -> String {
     "^(chore|docs|style|ci):".to_string()
+}
+
+fn default_log_dir() -> PathBuf {
+    Config::config_dir()
+}
+
+fn default_git_cache_dir() -> PathBuf {
+    Config::config_dir()
+}
+
+fn default_usage_cache_dir() -> PathBuf {
+    Config::config_dir()
+}
+
+fn default_summary_cache_dir() -> PathBuf {
+    Config::config_dir()
 }

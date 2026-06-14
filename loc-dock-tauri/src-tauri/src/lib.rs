@@ -2,6 +2,8 @@ mod commands;
 mod config;
 mod data;
 mod git;
+mod git_cache;
+mod job_log;
 mod pricing;
 mod summary;
 mod task_queue;
@@ -48,6 +50,11 @@ pub fn run() {
             commands::restart_app,
             commands::snap_to_corner,
             commands::get_active_tasks,
+            commands::reset_git_cache,
+            commands::reset_usage_cache,
+            commands::reset_summary_cache,
+            commands::get_job_logs,
+            commands::clear_job_logs,
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
@@ -72,6 +79,7 @@ pub fn run() {
                 }
             }
 
+            job_log::init(&config.settings.log_dir);
             data::spawn_data_loop(handle.clone(), config.clone(), stats.clone());
             summary::spawn_summary_loop(handle, config.clone());
             Ok(())

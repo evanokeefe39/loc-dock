@@ -274,8 +274,10 @@ const REPO_PROMPT: &str = "You receive git commit messages from a repository. \
 Return a JSON array of 1-4 short highlight strings (max 12 words each). \
 Order by impact: features and bug fixes first. \
 Skip minor items like docs, chores, formatting, typos, and dependency bumps. \
+If commit messages reference PRs (#123) or issue keys (ENG-456, PROJ-78), \
+include the reference in the highlight. \
 Focus on what changed, not how. No fluff. Example: \
-[\"Added user auth with JWT tokens\",\"Fixed payment webhook retry logic\"]. \
+[\"Added user auth with JWT tokens (#42)\",\"Fixed payment webhook retry logic\"]. \
 Return ONLY the JSON array, no other text.";
 
 /// Summarize commits per repo, returning RepoSummary structs.

@@ -1,5 +1,17 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, ReactNode } from "react";
 import { SummaryData } from "../lib/types";
+
+const REF_PATTERN = /(#\d+|[A-Z][A-Z0-9]+-\d+)/g;
+
+function formatHighlight(text: string): ReactNode {
+  const parts = text.split(REF_PATTERN);
+  if (parts.length === 1) return text;
+  return parts.map((part, i) =>
+    REF_PATTERN.test(part)
+      ? <span key={i} className="highlight-ref">{part}</span>
+      : part
+  );
+}
 
 interface Props {
   summary: SummaryData;
@@ -59,7 +71,7 @@ export function SummaryPanel({ summary }: Props) {
                 {repo.highlights.length > 0 && (
                   <ul className="card-highlights">
                     {repo.highlights.map((h, i) => (
-                      <li key={i}>{h}</li>
+                      <li key={i}>{formatHighlight(h)}</li>
                     ))}
                   </ul>
                 )}

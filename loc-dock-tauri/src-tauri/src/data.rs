@@ -18,10 +18,10 @@ pub type SharedStats = Arc<RwLock<AllStats>>;
 pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) {
     std::thread::spawn(move || {
         let mut store = UsageStore::new(&config.projects_dir);
-        let tz: Tz = config.settings.timezone.parse().unwrap_or(chrono_tz::Europe::Berlin);
+        let tz: Tz = config.settings.timezone.parse().unwrap_or(chrono_tz::UTC);
         let queue = app.state::<TaskQueue>();
 
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        std::thread::sleep(std::time::Duration::from_millis(500));
 
         loop {
             let cycle_start = std::time::Instant::now();

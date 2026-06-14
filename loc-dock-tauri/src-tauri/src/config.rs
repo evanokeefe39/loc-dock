@@ -92,7 +92,7 @@ impl Settings {
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| home.join(".claude")),
             timezone: std::env::var("LOCDOCK_TIMEZONE")
-                .unwrap_or_else(|_| "Europe/Berlin".to_string()),
+                .unwrap_or_else(|_| default_timezone()),
             day_start_hour: std::env::var("LOCDOCK_DAY_START_HOUR")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -140,7 +140,7 @@ impl Default for Settings {
         Settings {
             repos_dir: home.join("repos"),
             claude_dir: home.join(".claude"),
-            timezone: "Europe/Berlin".to_string(),
+            timezone: default_timezone(),
             day_start_hour: 7,
             week_start_day: 0,
             theme_path: Config::config_dir().join("theme.yaml"),
@@ -166,7 +166,7 @@ fn default_claude_dir() -> PathBuf {
 }
 
 fn default_timezone() -> String {
-    "Europe/Berlin".to_string()
+    iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string())
 }
 
 fn default_day_start_hour() -> u32 {

@@ -362,13 +362,13 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
             .settings
             .timezone
             .parse()
-            .unwrap_or(chrono_tz::Europe::Berlin);
+            .unwrap_or(chrono_tz::UTC);
         let store = if has_key { Some(SummaryStore::new(&config.config_dir)) } else { None };
         let debounce_secs = config.settings.summary_debounce_secs.max(60);
         let mut last_call: Option<Instant> = None;
         let queue = app.state::<TaskQueue>();
 
-        std::thread::sleep(std::time::Duration::from_secs(3));
+        std::thread::sleep(std::time::Duration::from_secs(1));
 
         loop {
             let cycle_start = Instant::now();
@@ -515,7 +515,7 @@ pub fn get_current_summary(config: &Config) -> SummaryData {
         .settings
         .timezone
         .parse()
-        .unwrap_or(chrono_tz::Europe::Berlin);
+        .unwrap_or(chrono_tz::UTC);
     let now_local = Utc::now().with_timezone(&tz);
     let day_s = time_utils::day_start(&now_local, config.settings.day_start_hour);
     let week_s = time_utils::week_start(&now_local, config.settings.day_start_hour, config.settings.week_start_day);

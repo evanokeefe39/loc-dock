@@ -30,6 +30,7 @@ log = "0.4"
 env_logger = "0.11"
 dirs = "6"
 regex = "1"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 tauri-plugin-autostart = "2"
 
 [profile.release]

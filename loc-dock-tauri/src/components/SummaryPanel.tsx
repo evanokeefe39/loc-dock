@@ -30,6 +30,8 @@ export function SummaryPanel({ summary, range }: Props) {
   const prs = range === "day" ? summary.day_prs : summary.week_prs;
 
   const hasRepos = repos.length > 0;
+  const hasHighlights = repos.some(r => r.highlights.length > 0);
+  const awaitingSummary = hasRepos && !hasHighlights && !summary.no_api_key;
 
   const onResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -59,8 +61,8 @@ export function SummaryPanel({ summary, range }: Props) {
           : range === "day" ? "No commits yet today" : "No commits this week"}
       </div>
       <div className="summary-body" style={{ height }}>
-        {summary.loading ? (
-          <span className="summary-empty">AI summary is being generated...</span>
+        {summary.loading || awaitingSummary ? (
+          <span className="summary-empty">Summaries are being generated...</span>
         ) : summary.no_api_key ? (
           <span className="summary-empty">Configure LLM API key in Settings to enable AI summaries</span>
         ) : !hasRepos ? (
@@ -73,6 +75,11 @@ export function SummaryPanel({ summary, range }: Props) {
                   <span className="card-name">{repo.name}</span>
                   <span className="card-count">{repo.commits}</span>
                 </div>
+                {repo.prs.length > 0 && (
+                  <div className="card-prs">
+                    {repo.prs.map(pr => <span key={pr} className="pr-badge">{pr}</span>)}
+                  </div>
+                )}
                 {repo.highlights.length > 0 && (
                   <ul className="card-highlights">
                     {repo.highlights.map((h, i) => (

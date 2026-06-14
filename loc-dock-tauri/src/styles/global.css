@@ -136,6 +136,19 @@ html, body {
   color: var(--text-dim);
 }
 
+.card-prs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin: 2px 0;
+}
+
+.pr-badge {
+  color: #5b9bf7;
+  font-size: var(--font-xs);
+  font-weight: bold;
+}
+
 .highlight-ref {
   color: #5b9bf7;
   font-weight: bold;

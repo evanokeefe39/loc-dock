@@ -18,6 +18,7 @@ use tauri::{AppHandle, Emitter, Manager};
 pub struct RepoSummary {
     pub name: String,
     pub commits: usize,
+    pub prs: Vec<String>,
     pub highlights: Vec<String>,
 }
 
@@ -35,17 +36,23 @@ pub struct SummaryData {
     pub no_api_key: bool,
 }
 
-fn count_prs(repos: &[RepoSummary]) -> usize {
-    let re = regex::Regex::new(r"PR-\d+").unwrap();
+fn extract_prs(commits: &[(String, String)]) -> Vec<String> {
+    let re = regex::Regex::new(r"\(#(\d+)\)").unwrap();
     let mut seen = std::collections::HashSet::new();
-    for repo in repos {
-        for h in &repo.highlights {
-            for m in re.find_iter(h) {
-                seen.insert(m.as_str().to_string());
+    let mut prs = Vec::new();
+    for (_, msg) in commits {
+        for cap in re.captures_iter(msg) {
+            let pr = format!("PR-{}", &cap[1]);
+            if seen.insert(pr.clone()) {
+                prs.push(pr);
             }
         }
     }
-    seen.len()
+    prs
+}
+
+fn count_prs(repos: &[RepoSummary]) -> usize {
+    repos.iter().map(|r| r.prs.len()).sum()
 }
 
 pub fn perf_log_from(config_dir: &Path, msg: &str) {
@@ -292,10 +299,9 @@ const REPO_PROMPT: &str = "You receive git commit messages from a repository. \
 Return a JSON array of 1-4 short highlight strings (max 12 words each). \
 Order by impact: features and bug fixes first. \
 Skip minor items like docs, chores, formatting, typos, and dependency bumps. \
-If commit messages reference PRs (#123), rewrite as PR-123 and prepend to the highlight. \
-Preserve issue keys (ENG-456, PROJ-78) as-is. \
+Strip PR references like (#3) from highlights — they are displayed separately. \
 Focus on what changed, not how. No fluff. Example: \
-[\"PR-42 Added user auth with JWT tokens\",\"Fixed payment webhook retry logic\"]. \
+[\"Added user auth with JWT tokens\",\"Fixed payment webhook retry logic\"]. \
 Return ONLY the JSON array, no other text.";
 
 /// Summarize commits per repo, returning RepoSummary structs.
@@ -325,6 +331,7 @@ fn summarize_repos(
         results.push(RepoSummary {
             name: repo.clone(),
             commits: cs.len(),
+            prs: extract_prs(cs),
             highlights,
         });
     }
@@ -394,7 +401,7 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
 
             let empty_repos = |commits: &HashMap<String, Vec<(String, String)>>| -> Vec<RepoSummary> {
                 commits.iter().map(|(name, cs)| RepoSummary {
-                    name: name.clone(), commits: cs.len(), highlights: vec![],
+                    name: name.clone(), commits: cs.len(), prs: extract_prs(cs), highlights: vec![],
                 }).collect()
             };
 
@@ -527,7 +534,7 @@ pub fn get_current_summary(config: &Config) -> SummaryData {
 
     let empty_repos = |commits: &HashMap<String, Vec<(String, String)>>| -> Vec<RepoSummary> {
         commits.iter().map(|(name, cs)| RepoSummary {
-            name: name.clone(), commits: cs.len(), highlights: vec![],
+            name: name.clone(), commits: cs.len(), prs: extract_prs(cs), highlights: vec![],
         }).collect()
     };
 

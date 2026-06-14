@@ -71,6 +71,7 @@ export type ChartMode = "loc" | "cost" | "tokens";
 export interface RepoSummary {
   name: string;
   commits: number;
+  prs: string[];
   highlights: string[];
 }
 

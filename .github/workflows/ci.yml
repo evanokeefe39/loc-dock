@@ -6,11 +6,14 @@ on:
     paths:
       - "loc-dock-tauri/**"
       - "!loc-dock-tauri/**/*.md"
+      - ".github/workflows/**"
   pull_request:
     branches: [master, main]
     paths:
       - "loc-dock-tauri/**"
       - "!loc-dock-tauri/**/*.md"
+      - ".github/workflows/**"
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

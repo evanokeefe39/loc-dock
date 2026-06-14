@@ -21,6 +21,8 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
 
         loop {
             info!("Data refresh starting");
+            let _ = app.emit("status-update", "Refreshing data...");
+
             let now_utc = Utc::now();
             let now_local = now_utc.with_timezone(&tz);
 
@@ -28,9 +30,19 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
             let day_s = time_utils::day_start(&now_local, config.settings.day_start_hour);
 
             let since_iso = week_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
-            let git_points = git::get_git_loc_timeline(&config.settings.repos_dir, &since_iso);
 
+            // Parallelize git scan and JSONL load
+            let repos_dir = config.settings.repos_dir.clone();
+            let since_clone = since_iso.clone();
+            let git_handle = std::thread::spawn(move || {
+                git::get_git_loc_timeline(&repos_dir, &since_clone)
+            });
+
+            let _ = app.emit("status-update", "Loading session data...");
             store.load();
+
+            let _ = app.emit("status-update", "Scanning git repos...");
+            let git_points = git_handle.join().unwrap_or_default();
 
             let week_utc_str = week_s
                 .with_timezone(&Utc)
@@ -60,6 +72,7 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
                 *s = all.clone();
             }
             let _ = app.emit("stats-update", &all);
+            let _ = app.emit("status-update", "Data refreshed");
             info!("Data refresh complete");
 
             std::thread::sleep(std::time::Duration::from_secs(config.settings.refresh_interval.max(10)));

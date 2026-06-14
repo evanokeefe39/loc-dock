@@ -70,10 +70,39 @@ html, body {
   font-size: var(--font-xs);
   line-height: 1.4;
   padding: 2px 0 4px;
-  max-height: 120px;
   overflow-y: auto;
-  white-space: pre-wrap;
 }
+
+.summary-body p { margin: 0 0 4px; }
+.summary-body p:last-child { margin: 0; }
+.summary-body ul, .summary-body ol { margin: 0 0 4px; padding-left: 14px; }
+.summary-body li { margin: 0 0 1px; }
+.summary-body strong { color: var(--text); }
+.summary-body h1, .summary-body h2, .summary-body h3 {
+  font-size: var(--font-xs);
+  font-weight: bold;
+  margin: 4px 0 2px;
+  color: var(--text);
+}
+
+.summary-resize {
+  height: 4px;
+  cursor: ns-resize;
+  -webkit-app-region: no-drag;
+  position: relative;
+}
+.summary-resize::after {
+  content: "";
+  position: absolute;
+  left: 30%;
+  right: 30%;
+  top: 1px;
+  height: 2px;
+  background: var(--text-dim);
+  border-radius: 1px;
+  opacity: 0.4;
+}
+.summary-resize:hover::after { opacity: 0.8; }
 
 @container dock (max-height: 100px) {
   .summary-panel { display: none; }
@@ -413,3 +442,30 @@ html, body {
   pointer-events: none;
 }
 .cost-tooltip pre { margin: 0; }
+
+/* ── Toast Notifications ── */
+.toast-container {
+  position: fixed;
+  bottom: 6px;
+  right: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  z-index: 500;
+  pointer-events: none;
+}
+
+.toast-item {
+  background: var(--tooltip-bg, rgba(0,0,0,0.85));
+  color: var(--text-dim);
+  font-size: var(--font-xs);
+  padding: 3px 8px;
+  border-radius: 2px;
+  white-space: nowrap;
+  animation: toast-in 0.2s ease-out;
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}

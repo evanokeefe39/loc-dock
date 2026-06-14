@@ -14,6 +14,7 @@ import { BottomRow } from "./components/BottomRow";
 import { CostTooltip } from "./components/CostTooltip";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { ResizeBorders } from "./components/ResizeBorders";
+import { ToastContainer } from "./components/Toast";
 import { TimeRange, ChartMode } from "./lib/types";
 import "./styles/global.css";
 
@@ -75,6 +76,7 @@ function App() {
       <CostTooltip breakdown={currentStats?.cost_breakdown ?? null} visible={tooltipVisible} />
       <SettingsPanel visible={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <ResizeBorders />
+      <ToastContainer />
     </div>
   );
 }

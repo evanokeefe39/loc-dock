@@ -296,6 +296,7 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
                 .unwrap_or(true);
 
             if needs_update && debounce_ok {
+                let _ = app.emit("status-update", "Generating AI summary...");
                 info!(
                     "Summary: {} repos, {} commits — calling LLM",
                     total_repos, total_commits

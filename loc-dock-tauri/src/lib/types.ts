@@ -71,13 +71,19 @@ export type ChartMode = "loc" | "cost" | "tokens";
 export interface RepoSummary {
   name: string;
   commits: number;
+  prs: string[];
   highlights: string[];
 }
 
 export interface SummaryData {
-  repos: RepoSummary[];
-  day_repos: number;
+  day_repos: RepoSummary[];
+  day_repo_count: number;
   day_commits: number;
+  day_prs: number;
+  week_repos: RepoSummary[];
+  week_repo_count: number;
+  week_commits: number;
+  week_prs: number;
   loading: boolean;
   no_api_key: boolean;
 }

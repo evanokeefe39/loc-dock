@@ -18,8 +18,6 @@ import { StatusSpinner } from "./components/Toast";
 import { TimeRange, ChartMode } from "./lib/types";
 import "./styles/global.css";
 
-type Corner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
-
 function App() {
   const stats = useStats();
   const summary = useSummary();
@@ -51,10 +49,6 @@ function App() {
   const currentStats = stats ? stats[range] : null;
   const MODES: ChartMode[] = ["loc", "cost", "tokens"];
 
-  const handleSnapTo = (corner: Corner) => {
-    invoke("snap_to_corner", { corner });
-  };
-
   const handleClose = () => getCurrentWindow().hide();
 
   return (
@@ -65,7 +59,6 @@ function App() {
         mode={mode}
         onToggleRange={() => setRange(r => r === "day" ? "week" : "day")}
         onToggleMode={() => setMode(m => MODES[(MODES.indexOf(m) + 1) % MODES.length])}
-        onSnapTo={handleSnapTo}
         onSettings={() => setSettingsOpen(true)}
         onClose={handleClose}
         onShowTooltip={setTooltipVisible}
@@ -73,7 +66,7 @@ function App() {
         summaryVisible={summaryOpen}
       />
       <NotificationBanner visible={summary.no_api_key} onSettings={() => setSettingsOpen(true)} />
-      {summaryOpen && <SummaryPanel summary={summary} />}
+      {summaryOpen && <SummaryPanel summary={summary} range={range} />}
       <Chart stats={stats} mode={mode} range={range} theme={theme} />
       <BottomRow tokens={currentStats?.tokens ?? null} />
       <CostTooltip breakdown={currentStats?.cost_breakdown ?? null} visible={tooltipVisible} />

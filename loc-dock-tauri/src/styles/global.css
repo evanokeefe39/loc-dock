@@ -82,7 +82,7 @@ html, body {
 
 .summary-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr));
   gap: 4px;
 }
 
@@ -136,8 +136,21 @@ html, body {
   color: var(--text-dim);
 }
 
+.card-prs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin: 2px 0;
+}
+
+.pr-badge {
+  color: #5b9bf7;
+  font-size: var(--font-xs);
+  font-weight: bold;
+}
+
 .highlight-ref {
-  color: var(--loc-add);
+  color: #5b9bf7;
   font-weight: bold;
 }
 

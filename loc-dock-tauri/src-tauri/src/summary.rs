@@ -18,16 +18,41 @@ use tauri::{AppHandle, Emitter, Manager};
 pub struct RepoSummary {
     pub name: String,
     pub commits: usize,
+    pub prs: Vec<String>,
     pub highlights: Vec<String>,
 }
 
 #[derive(Serialize, Clone, Default)]
 pub struct SummaryData {
-    pub repos: Vec<RepoSummary>,
-    pub day_repos: usize,
+    pub day_repos: Vec<RepoSummary>,
+    pub day_repo_count: usize,
     pub day_commits: usize,
+    pub day_prs: usize,
+    pub week_repos: Vec<RepoSummary>,
+    pub week_repo_count: usize,
+    pub week_commits: usize,
+    pub week_prs: usize,
     pub loading: bool,
     pub no_api_key: bool,
+}
+
+fn extract_prs(commits: &[(String, String)]) -> Vec<String> {
+    let re = regex::Regex::new(r"\(#(\d+)\)").unwrap();
+    let mut seen = std::collections::HashSet::new();
+    let mut prs = Vec::new();
+    for (_, msg) in commits {
+        for cap in re.captures_iter(msg) {
+            let pr = format!("PR-{}", &cap[1]);
+            if seen.insert(pr.clone()) {
+                prs.push(pr);
+            }
+        }
+    }
+    prs
+}
+
+fn count_prs(repos: &[RepoSummary]) -> usize {
+    repos.iter().map(|r| r.prs.len()).sum()
 }
 
 pub fn perf_log_from(config_dir: &Path, msg: &str) {
@@ -274,10 +299,9 @@ const REPO_PROMPT: &str = "You receive git commit messages from a repository. \
 Return a JSON array of 1-4 short highlight strings (max 12 words each). \
 Order by impact: features and bug fixes first. \
 Skip minor items like docs, chores, formatting, typos, and dependency bumps. \
-If commit messages reference PRs (#123) or issue keys (ENG-456, PROJ-78), \
-include the reference in the highlight. \
+Strip PR references like (#3) from highlights — they are displayed separately. \
 Focus on what changed, not how. No fluff. Example: \
-[\"Added user auth with JWT tokens (#42)\",\"Fixed payment webhook retry logic\"]. \
+[\"Added user auth with JWT tokens\",\"Fixed payment webhook retry logic\"]. \
 Return ONLY the JSON array, no other text.";
 
 /// Summarize commits per repo, returning RepoSummary structs.
@@ -307,6 +331,7 @@ fn summarize_repos(
         results.push(RepoSummary {
             name: repo.clone(),
             commits: cs.len(),
+            prs: extract_prs(cs),
             highlights,
         });
     }
@@ -337,99 +362,132 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
             .settings
             .timezone
             .parse()
-            .unwrap_or(chrono_tz::Europe::Berlin);
+            .unwrap_or(chrono_tz::UTC);
         let store = if has_key { Some(SummaryStore::new(&config.config_dir)) } else { None };
         let debounce_secs = config.settings.summary_debounce_secs.max(60);
         let mut last_call: Option<Instant> = None;
         let queue = app.state::<TaskQueue>();
 
-        std::thread::sleep(std::time::Duration::from_secs(3));
+        std::thread::sleep(std::time::Duration::from_secs(1));
 
         loop {
             let cycle_start = Instant::now();
             let now_utc = Utc::now();
             let now_local = now_utc.with_timezone(&tz);
             let day_s = time_utils::day_start(&now_local, config.settings.day_start_hour);
+            let week_s = time_utils::week_start(&now_local, config.settings.day_start_hour, config.settings.week_start_day);
 
             let day_date = day_s.format("%Y-%m-%d").to_string();
-            let since_iso = day_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
+            let week_date = week_s.format("%Y-%m-%d").to_string();
+            let day_since = day_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
+            let week_since = week_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
+            let exclude = &config.settings.summary_exclude_pattern;
 
             let collect_id = queue.start("Collecting commits");
             let _ = app.emit("tasks-changed", ());
 
             let git_start = Instant::now();
-            let commits = collect_commits_filtered(&config.settings.repos_dir, &since_iso, &config.settings.summary_exclude_pattern);
+            let day_commits = collect_commits_filtered(&config.settings.repos_dir, &day_since, exclude);
+            let week_commits = collect_commits_filtered(&config.settings.repos_dir, &week_since, exclude);
             let git_ms = git_start.elapsed().as_millis();
-            let total_commits: usize = commits.values().map(|v| v.len()).sum();
-            let total_repos = commits.len();
+
+            let day_total_commits: usize = day_commits.values().map(|v| v.len()).sum();
+            let day_total_repos = day_commits.len();
+            let week_total_commits: usize = week_commits.values().map(|v| v.len()).sum();
+            let week_total_repos = week_commits.len();
 
             queue.complete(collect_id);
             let _ = app.emit("tasks-changed", ());
 
-            let cached_repos: Vec<RepoSummary> = store.as_ref()
+            let empty_repos = |commits: &HashMap<String, Vec<(String, String)>>| -> Vec<RepoSummary> {
+                commits.iter().map(|(name, cs)| RepoSummary {
+                    name: name.clone(), commits: cs.len(), prs: extract_prs(cs), highlights: vec![],
+                }).collect()
+            };
+
+            let day_cached: Vec<RepoSummary> = store.as_ref()
                 .and_then(|s| s.get_summary(&day_date, "day"))
                 .and_then(|json| serde_json::from_str(&json).ok())
                 .unwrap_or_default();
+            let week_cached: Vec<RepoSummary> = store.as_ref()
+                .and_then(|s| s.get_summary(&week_date, "week"))
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .unwrap_or_default();
+
+            let day_loading = has_key && !day_commits.is_empty() && day_cached.is_empty();
+            let week_loading = has_key && !week_commits.is_empty() && week_cached.is_empty();
 
             let _ = app.emit("summary-update", &SummaryData {
-                repos: if cached_repos.is_empty() {
-                    commits.iter().map(|(name, cs)| RepoSummary {
-                        name: name.clone(), commits: cs.len(), highlights: vec![],
-                    }).collect()
-                } else {
-                    cached_repos.clone()
-                },
-                day_repos: total_repos,
-                day_commits: total_commits,
-                loading: has_key && !commits.is_empty() && cached_repos.is_empty(),
+                day_repos: if day_cached.is_empty() { empty_repos(&day_commits) } else { day_cached.clone() },
+                day_repo_count: day_total_repos,
+                day_commits: day_total_commits,
+                day_prs: count_prs(&day_cached),
+                week_repos: if week_cached.is_empty() { empty_repos(&week_commits) } else { week_cached.clone() },
+                week_repo_count: week_total_repos,
+                week_commits: week_total_commits,
+                week_prs: count_prs(&week_cached),
+                loading: day_loading || week_loading,
                 no_api_key: !has_key,
             });
 
             if let (Some(ref key), Some(ref store)) = (&api_key, &store) {
-                let current_shas = latest_shas(&commits);
-                let stored_shas = store.get_repo_shas(&day_date, "day");
-                let needs_update = current_shas != stored_shas && !commits.is_empty();
-                let debounce_ok = last_call
-                    .map(|t| t.elapsed().as_secs() >= debounce_secs)
-                    .unwrap_or(true);
+                for (scope, scope_date, commits, label) in [
+                    ("day", &day_date, &day_commits, "day"),
+                    ("week", &week_date, &week_commits, "week"),
+                ] {
+                    let current_shas = latest_shas(commits);
+                    let stored_shas = store.get_repo_shas(scope_date, scope);
+                    let needs_update = current_shas != stored_shas && !commits.is_empty();
+                    let debounce_ok = last_call
+                        .map(|t| t.elapsed().as_secs() >= debounce_secs)
+                        .unwrap_or(true);
 
-                if needs_update && debounce_ok {
-                    let llm_id = queue.start("Generating AI summaries");
-                    let _ = app.emit("tasks-changed", ());
-                    info!("Summary: {} repos, {} commits — calling LLM", total_repos, total_commits);
+                    if needs_update && debounce_ok {
+                        let total = commits.values().map(|v| v.len()).sum::<usize>();
+                        let llm_id = queue.start(&format!("Generating {} summaries", label));
+                        let _ = app.emit("tasks-changed", ());
+                        info!("Summary ({}): {} repos, {} commits — calling LLM", label, commits.len(), total);
 
-                    let llm_start = Instant::now();
-                    let repo_summaries = summarize_repos(&commits, key, &endpoint, &model);
-                    let llm_ms = llm_start.elapsed().as_millis();
+                        let llm_start = Instant::now();
+                        let repo_summaries = summarize_repos(commits, key, &endpoint, &model);
+                        let llm_ms = llm_start.elapsed().as_millis();
 
-                    let json = serde_json::to_string(&repo_summaries).unwrap_or_default();
-                    store.save_summary(&day_date, "day", &json, &current_shas);
-                    last_call = Some(Instant::now());
+                        let json = serde_json::to_string(&repo_summaries).unwrap_or_default();
+                        store.save_summary(scope_date, scope, &json, &current_shas);
+                        if scope == "day" {
+                            last_call = Some(Instant::now());
+                        }
 
-                    queue.complete(llm_id);
-                    let _ = app.emit("tasks-changed", ());
+                        queue.complete(llm_id);
+                        let _ = app.emit("tasks-changed", ());
 
-                    perf_log(&config.config_dir, &format!(
-                        "LLM summaries: {} repos in {}ms ({} commits)",
-                        repo_summaries.len(), llm_ms, total_commits
-                    ));
-                    info!("Repo summaries updated in {}ms", llm_ms);
+                        perf_log(&config.config_dir, &format!(
+                            "LLM summaries ({}): {} repos in {}ms ({} commits)",
+                            label, repo_summaries.len(), llm_ms, total
+                        ));
+                        info!("Repo summaries ({}) updated in {}ms", label, llm_ms);
+                    }
                 }
             }
 
-            let final_repos: Vec<RepoSummary> = store.as_ref()
+            let day_final: Vec<RepoSummary> = store.as_ref()
                 .and_then(|s| s.get_summary(&day_date, "day"))
                 .and_then(|json| serde_json::from_str(&json).ok())
-                .unwrap_or_else(|| {
-                    commits.iter().map(|(name, cs)| RepoSummary {
-                        name: name.clone(), commits: cs.len(), highlights: vec![],
-                    }).collect()
-                });
+                .unwrap_or_else(|| empty_repos(&day_commits));
+            let week_final: Vec<RepoSummary> = store.as_ref()
+                .and_then(|s| s.get_summary(&week_date, "week"))
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .unwrap_or_else(|| empty_repos(&week_commits));
 
             let data = SummaryData {
-                repos: final_repos,
-                day_repos: total_repos,
-                day_commits: total_commits,
+                day_prs: count_prs(&day_final),
+                day_repos: day_final,
+                day_repo_count: day_total_repos,
+                day_commits: day_total_commits,
+                week_prs: count_prs(&week_final),
+                week_repos: week_final,
+                week_repo_count: week_total_repos,
+                week_commits: week_total_commits,
                 loading: false,
                 no_api_key: !has_key,
             };
@@ -457,47 +515,57 @@ pub fn get_current_summary(config: &Config) -> SummaryData {
         .settings
         .timezone
         .parse()
-        .unwrap_or(chrono_tz::Europe::Berlin);
+        .unwrap_or(chrono_tz::UTC);
     let now_local = Utc::now().with_timezone(&tz);
     let day_s = time_utils::day_start(&now_local, config.settings.day_start_hour);
+    let week_s = time_utils::week_start(&now_local, config.settings.day_start_hour, config.settings.week_start_day);
+    let exclude = &config.settings.summary_exclude_pattern;
 
-    let since_iso = day_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
-    let commits = collect_commits_filtered(&config.settings.repos_dir, &since_iso, &config.settings.summary_exclude_pattern);
+    let day_since = day_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
+    let week_since = week_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
+    let day_commits = collect_commits_filtered(&config.settings.repos_dir, &day_since, exclude);
+    let week_commits = collect_commits_filtered(&config.settings.repos_dir, &week_since, exclude);
 
     let has_key = config.settings.llm_api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false)
         || std::env::var("DEEPSEEK_API_KEY").map(|k| !k.is_empty()).unwrap_or(false);
 
     let day_date = day_s.format("%Y-%m-%d").to_string();
+    let week_date = week_s.format("%Y-%m-%d").to_string();
 
-    let cached_repos: Vec<RepoSummary> = if has_key {
-        let db_path = config.config_dir.join("summaries.db");
-        if db_path.exists() {
-            Connection::open(&db_path).ok()
-                .and_then(|con| {
-                    con.prepare("SELECT summary FROM summaries WHERE date = ? AND scope = ?").ok()
-                        .and_then(|mut stmt| stmt.query_row(duckdb::params![&day_date, "day"], |row| row.get::<_, String>(0)).ok())
-                })
-                .and_then(|json| serde_json::from_str(&json).ok())
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        }
-    } else {
-        Vec::new()
-    };
-
-    let repos = if cached_repos.is_empty() {
+    let empty_repos = |commits: &HashMap<String, Vec<(String, String)>>| -> Vec<RepoSummary> {
         commits.iter().map(|(name, cs)| RepoSummary {
-            name: name.clone(), commits: cs.len(), highlights: vec![],
+            name: name.clone(), commits: cs.len(), prs: extract_prs(cs), highlights: vec![],
         }).collect()
-    } else {
-        cached_repos
     };
+
+    let load_cached = |date: &str, scope: &str| -> Vec<RepoSummary> {
+        if !has_key { return Vec::new(); }
+        let db_path = config.config_dir.join("summaries.db");
+        if !db_path.exists() { return Vec::new(); }
+        Connection::open(&db_path).ok()
+            .and_then(|con| {
+                con.prepare("SELECT summary FROM summaries WHERE date = ? AND scope = ?").ok()
+                    .and_then(|mut stmt| stmt.query_row(duckdb::params![date, scope], |row| row.get::<_, String>(0)).ok())
+            })
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default()
+    };
+
+    let day_cached = load_cached(&day_date, "day");
+    let week_cached = load_cached(&week_date, "week");
+
+    let day_repos = if day_cached.is_empty() { empty_repos(&day_commits) } else { day_cached };
+    let week_repos = if week_cached.is_empty() { empty_repos(&week_commits) } else { week_cached };
 
     SummaryData {
-        day_repos: commits.len(),
-        day_commits: commits.values().map(|v| v.len()).sum(),
-        repos,
+        day_prs: count_prs(&day_repos),
+        day_repos,
+        day_repo_count: day_commits.len(),
+        day_commits: day_commits.values().map(|v| v.len()).sum(),
+        week_prs: count_prs(&week_repos),
+        week_repos,
+        week_repo_count: week_commits.len(),
+        week_commits: week_commits.values().map(|v| v.len()).sum(),
         loading: false,
         no_api_key: !has_key,
     }

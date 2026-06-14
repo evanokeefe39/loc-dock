@@ -186,7 +186,7 @@ export function SettingsPanel({ visible, onClose }: Props) {
             min={10}
             max={600}
             value={settings.refresh_interval}
-            onChange={e => update("refresh_interval", Math.max(10, parseInt(e.target.value) || 60))}
+            onChange={e => update("refresh_interval", parseInt(e.target.value) || 0)}
           />
         </label>
 
@@ -197,7 +197,7 @@ export function SettingsPanel({ visible, onClose }: Props) {
             min={30}
             max={3600}
             value={settings.session_idle_timeout}
-            onChange={e => update("session_idle_timeout", Math.max(30, parseInt(e.target.value) || 300))}
+            onChange={e => update("session_idle_timeout", parseInt(e.target.value) || 0)}
           />
         </label>
 
@@ -256,7 +256,7 @@ export function SettingsPanel({ visible, onClose }: Props) {
             min={60}
             max={3600}
             value={settings.summary_debounce_secs}
-            onChange={e => update("summary_debounce_secs", Math.max(60, parseInt(e.target.value) || 300))}
+            onChange={e => update("summary_debounce_secs", parseInt(e.target.value) || 0)}
           />
         </label>
 

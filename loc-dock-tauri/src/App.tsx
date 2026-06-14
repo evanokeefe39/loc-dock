@@ -7,6 +7,7 @@ import { useStats } from "./hooks/useStats";
 import { useSummary } from "./hooks/useSummary";
 import { useTheme } from "./hooks/useTheme";
 import { SummaryPanel } from "./components/SummaryPanel";
+import { NotificationBanner } from "./components/NotificationBanner";
 import { TopRow } from "./components/TopRow";
 import { Chart } from "./components/Chart";
 import { BottomRow } from "./components/BottomRow";
@@ -56,7 +57,7 @@ function App() {
 
   return (
     <div className="app" data-tauri-drag-region>
-      <SummaryPanel summary={summary} range={range} onSettings={() => setSettingsOpen(true)} />
+      <SummaryPanel summary={summary} range={range} />
       <TopRow
         stats={currentStats}
         range={range}
@@ -68,6 +69,7 @@ function App() {
         onClose={handleClose}
         onShowTooltip={setTooltipVisible}
       />
+      <NotificationBanner visible={summary.no_api_key} onSettings={() => setSettingsOpen(true)} />
       <Chart stats={stats} mode={mode} range={range} theme={theme} />
       <BottomRow tokens={currentStats?.tokens ?? null} />
       <CostTooltip breakdown={currentStats?.cost_breakdown ?? null} visible={tooltipVisible} />

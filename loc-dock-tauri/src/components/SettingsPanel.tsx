@@ -69,7 +69,6 @@ export function SettingsPanel({ visible, onClose }: Props) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
-  const [saved, setSaved] = useState(false);
   const original = useRef<string>("");
 
   useEffect(() => {
@@ -78,8 +77,7 @@ export function SettingsPanel({ visible, onClose }: Props) {
         setSettings(s);
         original.current = JSON.stringify(s);
         setDirty(false);
-        setSaved(false);
-      }).catch(console.error);
+              }).catch(console.error);
     }
   }, [visible]);
 
@@ -89,8 +87,7 @@ export function SettingsPanel({ visible, onClose }: Props) {
     const updated = { ...settings, [field]: value };
     setSettings(updated);
     setDirty(JSON.stringify(updated) !== original.current);
-    setSaved(false);
-  };
+      };
 
   const VISUAL_ONLY: (keyof Settings)[] = ["theme_path", "autostart"];
 
@@ -105,11 +102,13 @@ export function SettingsPanel({ visible, onClose }: Props) {
   const handleSave = async () => {
     setSaving(true);
     try {
-      await invoke("save_settings", { settings });
       const restart = needsRestart();
+      await invoke("save_settings", { settings });
       original.current = JSON.stringify(settings);
       setDirty(false);
-      setSaved(restart);
+      if (restart) {
+        invoke("restart_app").catch(() => getCurrentWindow().close());
+      }
     } catch (e) {
       console.error("Save failed:", e);
     }
@@ -260,13 +259,6 @@ export function SettingsPanel({ visible, onClose }: Props) {
           />
         </label>
 
-        {saved && (
-          <button className="settings-restart" onClick={() => {
-            invoke("restart_app").catch(() => getCurrentWindow().close());
-          }}>
-            Restart to apply changes
-          </button>
-        )}
       </div>
     </div>
   );

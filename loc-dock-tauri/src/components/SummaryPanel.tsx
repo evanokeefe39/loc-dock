@@ -5,26 +5,13 @@ import { SummaryData, TimeRange } from "../lib/types";
 interface Props {
   summary: SummaryData;
   range: TimeRange;
-  onSettings: () => void;
 }
 
-export function SummaryPanel({ summary, range, onSettings }: Props) {
+export function SummaryPanel({ summary, range }: Props) {
   const [expanded, setExpanded] = useState(false);
 
   const text = range === "day" ? summary.day_summary : summary.week_summary;
   const hasContent = text !== null;
-
-  if (summary.no_api_key) {
-    return (
-      <div className="summary-panel summary-setup">
-        <button className="summary-header" onClick={onSettings}>
-          <span className="summary-teaser summary-setup-msg">
-            Add LLM API key in Settings for AI commit summaries
-          </span>
-        </button>
-      </div>
-    );
-  }
 
   if (!hasContent && !summary.loading && summary.day_commits === 0) return null;
 

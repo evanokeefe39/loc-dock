@@ -67,3 +67,11 @@ export interface Theme {
 
 export type TimeRange = "day" | "week";
 export type ChartMode = "loc" | "cost" | "tokens";
+
+export interface SummaryData {
+  day_summary: string | null;
+  week_summary: string | null;
+  day_repos: number;
+  day_commits: number;
+  loading: boolean;
+}

@@ -67,6 +67,4 @@ jobs:
 
       - name: Check Rust
         working-directory: loc-dock-tauri/src-tauri
-        env:
-          DUCKDB_DOWNLOAD_LIB: 1
         run: cargo check

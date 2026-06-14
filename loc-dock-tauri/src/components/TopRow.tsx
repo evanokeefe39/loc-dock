@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Pin, X, Info, Settings } from "lucide-react";
+import { Pin, X, Info, Settings, ScrollText } from "lucide-react";
 import { RangeStats, TimeRange, ChartMode } from "../lib/types";
 import { fmtCost, fmtLoc } from "../lib/format";
 
@@ -15,9 +15,11 @@ interface Props {
   onSettings: () => void;
   onClose: () => void;
   onShowTooltip: (show: boolean) => void;
+  onToggleSummary: () => void;
+  summaryVisible: boolean;
 }
 
-export function TopRow({ stats, range, mode, onToggleRange, onToggleMode, onSnapTo, onSettings, onClose, onShowTooltip }: Props) {
+export function TopRow({ stats, range, mode, onToggleRange, onToggleMode, onSnapTo, onSettings, onClose, onShowTooltip, onToggleSummary, summaryVisible }: Props) {
   const s = stats;
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -35,39 +37,47 @@ export function TopRow({ stats, range, mode, onToggleRange, onToggleMode, onSnap
 
   return (
     <div className="top-row">
-      <span className="loc-add">+{s ? fmtLoc(s.loc_added) : "0"}</span>
-      <span className="loc-del">-{s ? fmtLoc(s.loc_deleted) : "0"}</span>
-      <span className="sep" />
-      <span className="cost">{s ? fmtCost(s.cost_total) : "$0"}</span>
-      <span className="info-icon"
-        onMouseEnter={() => onShowTooltip(true)}
-        onMouseLeave={() => onShowTooltip(false)}>
-        <Info size={12} />
-      </span>
-      <span className="sep" />
-      <span className="sessions-label">S:</span>
-      <span className="sessions-active">{s?.sessions_active ?? 0}</span>
-      <span className="sessions-sep">/</span>
-      <span className="sessions-total">{s?.sessions_total ?? 0}</span>
-      <div className="spacer" />
-      <button className="toggle-btn" onClick={onToggleRange}>{range.toUpperCase()}</button>
-      <button className="toggle-btn" onClick={onToggleMode}>{mode.toUpperCase()}</button>
-      <span className="sep" />
-      <div className="pin-container" ref={menuRef}>
-        <button className="icon-btn" onClick={() => setMenuOpen(!menuOpen)}>
-          <Pin size={12} />
+      <div className="top-row-stats">
+        <button className={`icon-btn ${summaryVisible ? "active" : ""}`} onClick={onToggleSummary} title="AI Summary">
+          <ScrollText size={14} />
         </button>
-        {menuOpen && (
-          <div className="pin-menu">
-            <button onClick={() => { onSnapTo("top-left"); setMenuOpen(false); }}>↖ Top Left</button>
-            <button onClick={() => { onSnapTo("top-right"); setMenuOpen(false); }}>↗ Top Right</button>
-            <button onClick={() => { onSnapTo("bottom-left"); setMenuOpen(false); }}>↙ Bot Left</button>
-            <button onClick={() => { onSnapTo("bottom-right"); setMenuOpen(false); }}>↘ Bot Right</button>
-          </div>
-        )}
+        <span className="sep" />
+        <span className="loc-add">+{s ? fmtLoc(s.loc_added) : "0"}</span>
+        <span className="loc-del">-{s ? fmtLoc(s.loc_deleted) : "0"}</span>
+        <span className="sep" />
+        <span className="cost">{s ? fmtCost(s.cost_total) : "$0"}</span>
+        <span className="info-icon"
+          onMouseEnter={() => onShowTooltip(true)}
+          onMouseLeave={() => onShowTooltip(false)}>
+          <Info size={12} />
+        </span>
+        <span className="sep hide-narrow" />
+        <span className="sessions hide-narrow">
+          <span className="sessions-label">S:</span>
+          <span className="sessions-active">{s?.sessions_active ?? 0}</span>
+          <span className="sessions-sep">/</span>
+          <span className="sessions-total">{s?.sessions_total ?? 0}</span>
+        </span>
       </div>
-      <button className="icon-btn" onClick={onSettings}><Settings size={12} /></button>
-      <button className="icon-btn" onClick={onClose}><X size={12} /></button>
+      <div className="top-row-controls">
+        <button className="toggle-btn" onClick={onToggleRange}>{range.toUpperCase()}</button>
+        <button className="toggle-btn" onClick={onToggleMode}>{mode.toUpperCase()}</button>
+        <div className="pin-container" ref={menuRef}>
+          <button className="icon-btn" onClick={() => setMenuOpen(!menuOpen)}>
+            <Pin size={14} />
+          </button>
+          {menuOpen && (
+            <div className="pin-menu">
+              <button onClick={() => { onSnapTo("top-left"); setMenuOpen(false); }}>↖ Top Left</button>
+              <button onClick={() => { onSnapTo("top-right"); setMenuOpen(false); }}>↗ Top Right</button>
+              <button onClick={() => { onSnapTo("bottom-left"); setMenuOpen(false); }}>↙ Bot Left</button>
+              <button onClick={() => { onSnapTo("bottom-right"); setMenuOpen(false); }}>↘ Bot Right</button>
+            </div>
+          )}
+        </div>
+        <button className="icon-btn" onClick={onSettings}><Settings size={14} /></button>
+        <button className="icon-btn" onClick={onClose}><X size={14} /></button>
+      </div>
     </div>
   );
 }

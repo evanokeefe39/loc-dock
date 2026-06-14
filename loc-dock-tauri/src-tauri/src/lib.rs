@@ -3,7 +3,10 @@ mod config;
 mod data;
 mod git;
 mod pricing;
+mod summary;
+mod task_queue;
 mod theme;
+mod time_utils;
 mod tray;
 mod types;
 mod usage_store;
@@ -13,6 +16,7 @@ use data::SharedStats;
 use std::sync::{Arc, RwLock};
 use tauri::{Manager, WindowEvent};
 use tauri_plugin_autostart::MacosLauncher;
+use task_queue::TaskQueue;
 use theme::Theme;
 use types::AllStats;
 
@@ -34,13 +38,16 @@ pub fn run() {
         .manage(theme)
         .manage(stats.clone())
         .manage(config.clone())
+        .manage(TaskQueue::new())
         .invoke_handler(tauri::generate_handler![
             commands::get_theme,
             commands::get_stats,
+            commands::get_summary,
             commands::get_settings,
             commands::save_settings,
             commands::restart_app,
             commands::snap_to_corner,
+            commands::get_active_tasks,
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
@@ -65,7 +72,8 @@ pub fn run() {
                 }
             }
 
-            data::spawn_data_loop(handle, config.clone(), stats.clone());
+            data::spawn_data_loop(handle.clone(), config.clone(), stats.clone());
+            summary::spawn_summary_loop(handle, config.clone());
             Ok(())
         })
         .run(tauri::generate_context!())

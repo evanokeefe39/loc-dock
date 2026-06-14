@@ -1,13 +1,15 @@
+use crate::time_utils;
 use crate::config::Config;
 use crate::git::{self, GitPoint};
 use crate::pricing;
+use crate::task_queue::TaskQueue;
 use crate::types::*;
 use crate::usage_store::UsageStore;
-use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
+use chrono::{DateTime, Duration, Timelike, Utc};
 use chrono_tz::Tz;
-use log::{info, warn};
+use log::info;
 use std::sync::{Arc, RwLock};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 const N_BUCKETS: usize = 48;
 
@@ -17,20 +19,41 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
     std::thread::spawn(move || {
         let mut store = UsageStore::new(&config.projects_dir);
         let tz: Tz = config.settings.timezone.parse().unwrap_or(chrono_tz::Europe::Berlin);
+        let queue = app.state::<TaskQueue>();
+
+        std::thread::sleep(std::time::Duration::from_secs(2));
 
         loop {
+            let cycle_start = std::time::Instant::now();
             info!("Data refresh starting");
+
+            let refresh_id = queue.start("Refreshing data");
+            let _ = app.emit("tasks-changed", ());
+
             let now_utc = Utc::now();
             let now_local = now_utc.with_timezone(&tz);
 
-            let week_s = week_start(&now_local, config.settings.day_start_hour, config.settings.week_start_day);
-            let day_s = day_start(&now_local, config.settings.day_start_hour);
+            let week_s = time_utils::week_start(&now_local, config.settings.day_start_hour, config.settings.week_start_day);
+            let day_s = time_utils::day_start(&now_local, config.settings.day_start_hour);
 
             let since_iso = week_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
-            let git_points = git::get_git_loc_timeline(&config.settings.repos_dir, &since_iso);
 
-            store.load();
+            let repos_dir = config.settings.repos_dir.clone();
+            let since_clone = since_iso.clone();
+            let git_handle = std::thread::spawn(move || {
+                let t = std::time::Instant::now();
+                let result = git::get_git_loc_timeline(&repos_dir, &since_clone);
+                (result, t.elapsed())
+            });
 
+            let jsonl_start = std::time::Instant::now();
+            let jsonl_rebuilt = store.load();
+            let jsonl_ms = jsonl_start.elapsed().as_millis();
+
+            let (git_points, git_elapsed) = git_handle.join().unwrap_or_else(|_| (Vec::new(), std::time::Duration::ZERO));
+            let git_ms = git_elapsed.as_millis();
+
+            let stats_start = std::time::Instant::now();
             let week_utc_str = week_s
                 .with_timezone(&Utc)
                 .format("%Y-%m-%d %H:%M:%S")
@@ -54,12 +77,25 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
                 &active_str,
                 config.settings.day_start_hour,
             );
+            let stats_ms = stats_start.elapsed().as_millis();
 
             if let Ok(mut s) = stats.write() {
                 *s = all.clone();
             }
             let _ = app.emit("stats-update", &all);
-            info!("Data refresh complete");
+
+            queue.complete(refresh_id);
+            let _ = app.emit("tasks-changed", ());
+
+            let total_ms = cycle_start.elapsed().as_millis();
+            let timing = format!(
+                "Refreshed in {}ms (git:{}ms jsonl:{}ms{} stats:{}ms)",
+                total_ms, git_ms, jsonl_ms,
+                if jsonl_rebuilt { " [rebuilt]" } else { " [cached]" },
+                stats_ms
+            );
+            info!("{}", timing);
+            crate::summary::perf_log_from(&config.config_dir, &timing);
 
             std::thread::sleep(std::time::Duration::from_secs(config.settings.refresh_interval.max(10)));
         }
@@ -266,23 +302,3 @@ fn compute_time_labels(
     TimeLabels { start, end, ticks }
 }
 
-fn day_start(now: &DateTime<Tz>, hour: u32) -> DateTime<Tz> {
-    let today = now
-        .with_hour(hour)
-        .and_then(|t| t.with_minute(0))
-        .and_then(|t| t.with_second(0))
-        .and_then(|t| t.with_nanosecond(0))
-        .unwrap_or(*now);
-    if *now < today {
-        today - Duration::days(1)
-    } else {
-        today
-    }
-}
-
-fn week_start(now: &DateTime<Tz>, hour: u32, week_start_day: u32) -> DateTime<Tz> {
-    let ds = day_start(now, hour);
-    let days_since = (ds.weekday().num_days_from_monday() as i32 - week_start_day as i32)
-        .rem_euclid(7) as i64;
-    ds - Duration::days(days_since)
-}

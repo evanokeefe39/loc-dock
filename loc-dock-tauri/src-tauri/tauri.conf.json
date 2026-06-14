@@ -14,9 +14,9 @@
       {
         "label": "main",
         "title": "LOC Dock",
-        "width": 420,
+        "width": 500,
         "height": 340,
-        "minWidth": 380,
+        "minWidth": 460,
         "decorations": false,
         "alwaysOnTop": true,
         "transparent": true,

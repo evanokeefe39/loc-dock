@@ -1,9 +1,10 @@
+use crate::time_utils;
 use crate::config::Config;
 use crate::git::{self, GitPoint};
 use crate::pricing;
 use crate::types::*;
 use crate::usage_store::UsageStore;
-use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
+use chrono::{DateTime, Duration, Timelike, Utc};
 use chrono_tz::Tz;
 use log::{info, warn};
 use std::sync::{Arc, RwLock};
@@ -23,8 +24,8 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
             let now_utc = Utc::now();
             let now_local = now_utc.with_timezone(&tz);
 
-            let week_s = week_start(&now_local, config.settings.day_start_hour, config.settings.week_start_day);
-            let day_s = day_start(&now_local, config.settings.day_start_hour);
+            let week_s = time_utils::week_start(&now_local, config.settings.day_start_hour, config.settings.week_start_day);
+            let day_s = time_utils::day_start(&now_local, config.settings.day_start_hour);
 
             let since_iso = week_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
             let git_points = git::get_git_loc_timeline(&config.settings.repos_dir, &since_iso);
@@ -266,23 +267,3 @@ fn compute_time_labels(
     TimeLabels { start, end, ticks }
 }
 
-fn day_start(now: &DateTime<Tz>, hour: u32) -> DateTime<Tz> {
-    let today = now
-        .with_hour(hour)
-        .and_then(|t| t.with_minute(0))
-        .and_then(|t| t.with_second(0))
-        .and_then(|t| t.with_nanosecond(0))
-        .unwrap_or(*now);
-    if *now < today {
-        today - Duration::days(1)
-    } else {
-        today
-    }
-}
-
-fn week_start(now: &DateTime<Tz>, hour: u32, week_start_day: u32) -> DateTime<Tz> {
-    let ds = day_start(now, hour);
-    let days_since = (ds.weekday().num_days_from_monday() as i32 - week_start_day as i32)
-        .rem_euclid(7) as i64;
-    ds - Duration::days(days_since)
-}

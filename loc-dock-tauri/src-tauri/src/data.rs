@@ -23,6 +23,7 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
         std::thread::sleep(std::time::Duration::from_secs(2));
 
         loop {
+            let cycle_start = std::time::Instant::now();
             info!("Data refresh starting");
             let _ = app.emit("status-update", "Refreshing data...");
 
@@ -38,15 +39,21 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
             let repos_dir = config.settings.repos_dir.clone();
             let since_clone = since_iso.clone();
             let git_handle = std::thread::spawn(move || {
-                git::get_git_loc_timeline(&repos_dir, &since_clone)
+                let t = std::time::Instant::now();
+                let result = git::get_git_loc_timeline(&repos_dir, &since_clone);
+                (result, t.elapsed())
             });
 
+            let jsonl_start = std::time::Instant::now();
             let _ = app.emit("status-update", "Loading session data...");
-            store.load();
+            let jsonl_rebuilt = store.load();
+            let jsonl_ms = jsonl_start.elapsed().as_millis();
 
             let _ = app.emit("status-update", "Scanning git repos...");
-            let git_points = git_handle.join().unwrap_or_default();
+            let (git_points, git_elapsed) = git_handle.join().unwrap_or_else(|_| (Vec::new(), std::time::Duration::ZERO));
+            let git_ms = git_elapsed.as_millis();
 
+            let stats_start = std::time::Instant::now();
             let week_utc_str = week_s
                 .with_timezone(&Utc)
                 .format("%Y-%m-%d %H:%M:%S")
@@ -70,13 +77,22 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
                 &active_str,
                 config.settings.day_start_hour,
             );
+            let stats_ms = stats_start.elapsed().as_millis();
 
             if let Ok(mut s) = stats.write() {
                 *s = all.clone();
             }
             let _ = app.emit("stats-update", &all);
-            let _ = app.emit("status-update", "Data refreshed");
-            info!("Data refresh complete");
+
+            let total_ms = cycle_start.elapsed().as_millis();
+            let timing = format!(
+                "Refreshed in {}ms (git:{}ms jsonl:{}ms{} stats:{}ms)",
+                total_ms, git_ms, jsonl_ms,
+                if jsonl_rebuilt { " [rebuilt]" } else { " [cached]" },
+                stats_ms
+            );
+            info!("{}", timing);
+            let _ = app.emit("status-update", &timing);
 
             std::thread::sleep(std::time::Duration::from_secs(config.settings.refresh_interval.max(10)));
         }

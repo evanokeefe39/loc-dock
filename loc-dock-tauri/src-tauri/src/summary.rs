@@ -259,6 +259,7 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
         std::thread::sleep(std::time::Duration::from_secs(3));
 
         loop {
+            let cycle_start = Instant::now();
             let now_utc = Utc::now();
             let now_local = now_utc.with_timezone(&tz);
             let day_s = time_utils::day_start(&now_local, config.settings.day_start_hour);
@@ -272,8 +273,9 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
             let week_date = week_s.format("%Y-%m-%d").to_string();
             let since_iso = day_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
 
-            // Collect today's commits
+            let git_start = Instant::now();
             let commits = collect_commits(&config.settings.repos_dir, &since_iso);
+            let git_ms = git_start.elapsed().as_millis();
             let total_commits: usize = commits.values().map(|v| v.len()).sum();
             let total_repos = commits.len();
 
@@ -300,22 +302,29 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
                     let _ = app.emit("status-update", "Generating AI summary...");
                     info!("Summary: {} repos, {} commits — calling LLM", total_repos, total_commits);
 
+                    let llm_start = Instant::now();
                     let content = format_commits_for_prompt(&commits, 200);
                     match call_llm(key, &endpoint, &model, DAY_PROMPT, &content) {
                         Ok(summary) => {
+                            let day_llm_ms = llm_start.elapsed().as_millis();
                             store.save_summary(&day_date, "day", &summary, &current_shas);
                             last_call = Some(Instant::now());
-                            info!("Day summary updated");
+                            info!("Day summary updated in {}ms", day_llm_ms);
 
+                            let week_git_start = Instant::now();
                             let week_since_iso = week_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
                             let week_commits = collect_commits(&config.settings.repos_dir, &week_since_iso);
+                            let week_git_ms = week_git_start.elapsed().as_millis();
+
                             if !week_commits.is_empty() {
+                                let week_llm_start = Instant::now();
                                 let week_content = format_commits_for_prompt(&week_commits, 200);
                                 match call_llm(key, &endpoint, &model, WEEK_PROMPT, &week_content) {
                                     Ok(week_summary) => {
+                                        let week_llm_ms = week_llm_start.elapsed().as_millis();
                                         let week_shas = latest_shas(&week_commits);
                                         store.save_summary(&week_date, "week", &week_summary, &week_shas);
-                                        info!("Week summary updated");
+                                        info!("Week summary updated in {}ms (git:{}ms)", week_llm_ms, week_git_ms);
                                     }
                                     Err(e) => warn!("Week summary LLM call failed: {}", e),
                                 }
@@ -335,6 +344,11 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
                 no_api_key: !has_key,
             };
             let _ = app.emit("summary-update", &data);
+
+            let total_ms = cycle_start.elapsed().as_millis();
+            let timing = format!("Summary cycle: {}ms (git:{}ms)", total_ms, git_ms);
+            info!("{}", timing);
+            let _ = app.emit("status-update", &timing);
 
             std::thread::sleep(std::time::Duration::from_secs(
                 config.settings.refresh_interval.max(10),

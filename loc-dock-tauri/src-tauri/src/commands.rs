@@ -1,5 +1,6 @@
 use crate::config::{Config, Settings};
 use crate::data::SharedStats;
+use crate::summary::{self, SummaryData};
 use crate::theme::Theme;
 use crate::types::AllStats;
 use std::sync::Arc;
@@ -14,6 +15,12 @@ pub fn get_theme(app: AppHandle) -> Theme {
 pub fn get_stats(app: AppHandle) -> AllStats {
     let stats = app.state::<SharedStats>();
     stats.read().map(|s| s.clone()).unwrap_or_default()
+}
+
+#[tauri::command]
+pub fn get_summary(app: AppHandle) -> SummaryData {
+    let config = app.state::<Arc<Config>>();
+    summary::get_current_summary(&config)
 }
 
 #[tauri::command]

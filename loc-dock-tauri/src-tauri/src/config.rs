@@ -24,7 +24,11 @@ pub struct Settings {
     #[serde(default = "default_summary_enabled")]
     pub summary_enabled: bool,
     #[serde(default)]
-    pub deepseek_api_key: Option<String>,
+    pub llm_api_key: Option<String>,
+    #[serde(default = "default_llm_api_endpoint")]
+    pub llm_api_endpoint: String,
+    #[serde(default = "default_llm_model")]
+    pub llm_model: String,
     #[serde(default = "default_summary_debounce_secs")]
     pub summary_debounce_secs: u64,
 }
@@ -108,7 +112,13 @@ impl Settings {
             summary_enabled: std::env::var("LOCDOCK_SUMMARY_ENABLED")
                 .map(|s| s != "false" && s != "0")
                 .unwrap_or(true),
-            deepseek_api_key: std::env::var("DEEPSEEK_API_KEY").ok(),
+            llm_api_key: std::env::var("LOCDOCK_LLM_API_KEY")
+                .or_else(|_| std::env::var("DEEPSEEK_API_KEY"))
+                .ok(),
+            llm_api_endpoint: std::env::var("LOCDOCK_LLM_ENDPOINT")
+                .unwrap_or_else(|_| "https://api.deepseek.com/v1".to_string()),
+            llm_model: std::env::var("LOCDOCK_LLM_MODEL")
+                .unwrap_or_else(|_| "deepseek-chat".to_string()),
             summary_debounce_secs: 300,
         }
     }
@@ -135,7 +145,9 @@ impl Default for Settings {
             refresh_interval: 60,
             session_idle_timeout: 300,
             summary_enabled: true,
-            deepseek_api_key: None,
+            llm_api_key: None,
+            llm_api_endpoint: "https://api.deepseek.com/v1".to_string(),
+            llm_model: "deepseek-chat".to_string(),
             summary_debounce_secs: 300,
         }
     }
@@ -171,6 +183,14 @@ fn default_session_idle_timeout() -> u64 {
 
 fn default_summary_enabled() -> bool {
     true
+}
+
+fn default_llm_api_endpoint() -> String {
+    "https://api.deepseek.com/v1".to_string()
+}
+
+fn default_llm_model() -> String {
+    "deepseek-chat".to_string()
 }
 
 fn default_summary_debounce_secs() -> u64 {

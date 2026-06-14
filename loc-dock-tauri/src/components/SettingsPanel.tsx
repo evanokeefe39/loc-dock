@@ -13,6 +13,11 @@ interface Settings {
   autostart: boolean;
   refresh_interval: number;
   session_idle_timeout: number;
+  summary_enabled: boolean;
+  llm_api_key: string | null;
+  llm_api_endpoint: string;
+  llm_model: string;
+  summary_debounce_secs: number;
 }
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
@@ -80,7 +85,7 @@ export function SettingsPanel({ visible, onClose }: Props) {
 
   if (!visible || !settings) return null;
 
-  const update = (field: keyof Settings, value: string | number | boolean) => {
+  const update = (field: keyof Settings, value: string | number | boolean | null) => {
     const updated = { ...settings, [field]: value };
     setSettings(updated);
     setDirty(JSON.stringify(updated) !== original.current);
@@ -203,6 +208,56 @@ export function SettingsPanel({ visible, onClose }: Props) {
             onChange={e => update("autostart", e.target.checked)}
           />
           <span>Start on login</span>
+        </label>
+
+        <div className="settings-divider" />
+
+        <label className="settings-checkbox">
+          <input
+            type="checkbox"
+            checked={settings.summary_enabled}
+            onChange={e => update("summary_enabled", e.target.checked)}
+          />
+          <span>AI commit summaries</span>
+        </label>
+
+        <label title="API key for an OpenAI-compatible LLM provider (e.g. DeepSeek, OpenAI, OpenRouter)">
+          <span>LLM API key</span>
+          <input
+            type="password"
+            value={settings.llm_api_key ?? ""}
+            onChange={e => update("llm_api_key", e.target.value || null)}
+            placeholder="sk-..."
+          />
+        </label>
+
+        <label title="Base URL for the chat completions API (OpenAI-compatible)">
+          <span>LLM endpoint</span>
+          <input
+            value={settings.llm_api_endpoint}
+            onChange={e => update("llm_api_endpoint", e.target.value)}
+            placeholder="https://api.deepseek.com/v1"
+          />
+        </label>
+
+        <label title="Model name to use for summaries">
+          <span>LLM model</span>
+          <input
+            value={settings.llm_model}
+            onChange={e => update("llm_model", e.target.value)}
+            placeholder="deepseek-chat"
+          />
+        </label>
+
+        <label title="Minimum seconds between LLM calls (prevents excessive API usage)">
+          <span>Summary debounce (seconds)</span>
+          <input
+            type="number"
+            min={60}
+            max={3600}
+            value={settings.summary_debounce_secs}
+            onChange={e => update("summary_debounce_secs", Math.max(60, parseInt(e.target.value) || 300))}
+          />
         </label>
 
         {saved && (

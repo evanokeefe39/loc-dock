@@ -3,7 +3,9 @@ mod config;
 mod data;
 mod git;
 mod pricing;
+mod summary;
 mod theme;
+mod time_utils;
 mod tray;
 mod types;
 mod usage_store;
@@ -37,6 +39,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_theme,
             commands::get_stats,
+            commands::get_summary,
             commands::get_settings,
             commands::save_settings,
             commands::restart_app,
@@ -65,7 +68,8 @@ pub fn run() {
                 }
             }
 
-            data::spawn_data_loop(handle, config.clone(), stats.clone());
+            data::spawn_data_loop(handle.clone(), config.clone(), stats.clone());
+            summary::spawn_summary_loop(handle, config.clone());
             Ok(())
         })
         .run(tauri::generate_context!())

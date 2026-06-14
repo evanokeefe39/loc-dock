@@ -4,7 +4,9 @@ import { LogicalSize } from "@tauri-apps/api/dpi";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useStats } from "./hooks/useStats";
+import { useSummary } from "./hooks/useSummary";
 import { useTheme } from "./hooks/useTheme";
+import { SummaryPanel } from "./components/SummaryPanel";
 import { TopRow } from "./components/TopRow";
 import { Chart } from "./components/Chart";
 import { BottomRow } from "./components/BottomRow";
@@ -18,6 +20,7 @@ type Corner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 
 function App() {
   const stats = useStats();
+  const summary = useSummary();
   const theme = useTheme();
   const shown = useRef(false);
 
@@ -53,6 +56,7 @@ function App() {
 
   return (
     <div className="app" data-tauri-drag-region>
+      <SummaryPanel summary={summary} range={range} onSettings={() => setSettingsOpen(true)} />
       <TopRow
         stats={currentStats}
         range={range}

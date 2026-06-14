@@ -36,6 +36,54 @@ html, body {
   .chart, .bottom-row { display: none; }
 }
 
+/* ── Summary Panel ── */
+.summary-panel {
+  flex-shrink: 0;
+  font-size: var(--font-xs);
+  -webkit-app-region: no-drag;
+  overflow: hidden;
+}
+
+.summary-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: var(--font-xs);
+  padding: 2px 0;
+  cursor: pointer;
+}
+.summary-header:hover { color: var(--text); }
+
+.summary-teaser {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.summary-setup-msg {
+  color: var(--cost);
+  font-style: italic;
+}
+
+.summary-body {
+  color: var(--text);
+  font-size: var(--font-xs);
+  line-height: 1.4;
+  padding: 2px 0 4px;
+  max-height: 120px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
+
+@container dock (max-height: 100px) {
+  .summary-panel { display: none; }
+}
+
 /* ── Top Row ── */
 .top-row {
   display: flex;

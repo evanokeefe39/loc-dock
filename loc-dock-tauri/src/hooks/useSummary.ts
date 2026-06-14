@@ -9,6 +9,7 @@ const DEFAULT: SummaryData = {
   day_repos: 0,
   day_commits: 0,
   loading: false,
+  no_api_key: false,
 };
 
 export function useSummary() {

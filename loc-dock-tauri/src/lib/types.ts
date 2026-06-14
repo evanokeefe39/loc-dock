@@ -74,4 +74,5 @@ export interface SummaryData {
   day_repos: number;
   day_commits: number;
   loading: boolean;
+  no_api_key: boolean;
 }

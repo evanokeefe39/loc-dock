@@ -6,7 +6,7 @@ use crate::types::*;
 use crate::usage_store::UsageStore;
 use chrono::{DateTime, Duration, Timelike, Utc};
 use chrono_tz::Tz;
-use log::{info, warn};
+use log::info;
 use std::sync::{Arc, RwLock};
 use tauri::{AppHandle, Emitter};
 

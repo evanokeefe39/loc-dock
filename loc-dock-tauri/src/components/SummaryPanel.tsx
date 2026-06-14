@@ -51,7 +51,11 @@ export function SummaryPanel({ summary, range }: Props) {
           : <span className="summary-empty">
               {summary.no_api_key
                 ? "Configure LLM API key in Settings to enable AI summaries"
-                : summary.loading ? "Generating summary..." : "Waiting for commits..."}
+                : summary.loading
+                  ? "AI summary is being generated..."
+                  : summary.day_commits > 0
+                    ? "Summary available after next refresh"
+                    : "No commits yet today"}
             </span>
         }
       </div>

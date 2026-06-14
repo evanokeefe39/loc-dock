@@ -238,18 +238,12 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
         .settings
         .llm_api_key
         .clone()
-        .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok());
-
-    let api_key = match api_key {
-        Some(k) if !k.is_empty() => k,
-        _ => {
-            info!("No LLM API key configured; summary feature disabled");
-            return;
-        }
-    };
+        .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok())
+        .filter(|k| !k.is_empty());
 
     let endpoint = config.settings.llm_api_endpoint.clone();
     let model = config.settings.llm_model.clone();
+    let has_key = api_key.is_some();
 
     std::thread::spawn(move || {
         let tz: Tz = config
@@ -257,15 +251,14 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
             .timezone
             .parse()
             .unwrap_or(chrono_tz::Europe::Berlin);
-        let store = SummaryStore::new(&config.config_dir);
+        let store = if has_key { Some(SummaryStore::new(&config.config_dir)) } else { None };
         let debounce_secs = config.settings.summary_debounce_secs.max(60);
         let mut last_call: Option<Instant> = None;
 
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(
-                config.settings.refresh_interval.max(10),
-            ));
+        // Short delay for frontend to mount, then run first iteration immediately
+        std::thread::sleep(std::time::Duration::from_secs(3));
 
+        loop {
             let now_utc = Utc::now();
             let now_local = now_utc.with_timezone(&tz);
             let day_s = time_utils::day_start(&now_local, config.settings.day_start_hour);
@@ -281,70 +274,71 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
 
             // Collect today's commits
             let commits = collect_commits(&config.settings.repos_dir, &since_iso);
-            let current_shas = latest_shas(&commits);
-            let stored_shas = store.get_repo_shas(&day_date, "day");
-
             let total_commits: usize = commits.values().map(|v| v.len()).sum();
             let total_repos = commits.len();
 
-            // Check if anything changed
-            let needs_update = current_shas != stored_shas && !commits.is_empty();
+            // Emit current counts immediately (before LLM call)
+            let _ = app.emit("summary-update", &SummaryData {
+                day_summary: store.as_ref().and_then(|s| s.get_summary(&day_date, "day")),
+                week_summary: store.as_ref().and_then(|s| s.get_summary(&week_date, "week")),
+                day_repos: total_repos,
+                day_commits: total_commits,
+                loading: has_key && !commits.is_empty(),
+                no_api_key: !has_key,
+            });
 
-            // Debounce: avoid calling the LLM too frequently
-            let debounce_ok = last_call
-                .map(|t| t.elapsed().as_secs() >= debounce_secs)
-                .unwrap_or(true);
+            // LLM summarization (only if API key configured)
+            if let (Some(ref key), Some(ref store)) = (&api_key, &store) {
+                let current_shas = latest_shas(&commits);
+                let stored_shas = store.get_repo_shas(&day_date, "day");
+                let needs_update = current_shas != stored_shas && !commits.is_empty();
+                let debounce_ok = last_call
+                    .map(|t| t.elapsed().as_secs() >= debounce_secs)
+                    .unwrap_or(true);
 
-            if needs_update && debounce_ok {
-                let _ = app.emit("status-update", "Generating AI summary...");
-                info!(
-                    "Summary: {} repos, {} commits — calling LLM",
-                    total_repos, total_commits
-                );
+                if needs_update && debounce_ok {
+                    let _ = app.emit("status-update", "Generating AI summary...");
+                    info!("Summary: {} repos, {} commits — calling LLM", total_repos, total_commits);
 
-                let content = format_commits_for_prompt(&commits, 200);
-                match call_llm(&api_key, &endpoint, &model, DAY_PROMPT, &content) {
-                    Ok(summary) => {
-                        store.save_summary(&day_date, "day", &summary, &current_shas);
-                        last_call = Some(Instant::now());
-                        info!("Day summary updated");
+                    let content = format_commits_for_prompt(&commits, 200);
+                    match call_llm(key, &endpoint, &model, DAY_PROMPT, &content) {
+                        Ok(summary) => {
+                            store.save_summary(&day_date, "day", &summary, &current_shas);
+                            last_call = Some(Instant::now());
+                            info!("Day summary updated");
 
-                        // Also generate weekly summary from all commits this week
-                        let week_since_iso = week_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
-                        let week_commits =
-                            collect_commits(&config.settings.repos_dir, &week_since_iso);
-                        if !week_commits.is_empty() {
-                            let week_content = format_commits_for_prompt(&week_commits, 200);
-                            match call_llm(&api_key, &endpoint, &model, WEEK_PROMPT, &week_content) {
-                                Ok(week_summary) => {
-                                    let week_shas = latest_shas(&week_commits);
-                                    store.save_summary(
-                                        &week_date,
-                                        "week",
-                                        &week_summary,
-                                        &week_shas,
-                                    );
-                                    info!("Week summary updated");
+                            let week_since_iso = week_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
+                            let week_commits = collect_commits(&config.settings.repos_dir, &week_since_iso);
+                            if !week_commits.is_empty() {
+                                let week_content = format_commits_for_prompt(&week_commits, 200);
+                                match call_llm(key, &endpoint, &model, WEEK_PROMPT, &week_content) {
+                                    Ok(week_summary) => {
+                                        let week_shas = latest_shas(&week_commits);
+                                        store.save_summary(&week_date, "week", &week_summary, &week_shas);
+                                        info!("Week summary updated");
+                                    }
+                                    Err(e) => warn!("Week summary LLM call failed: {}", e),
                                 }
-                                Err(e) => warn!("Week summary LLM call failed: {}", e),
                             }
                         }
-                    }
-                    Err(e) => {
-                        warn!("Day summary LLM call failed: {}", e);
+                        Err(e) => warn!("Day summary LLM call failed: {}", e),
                     }
                 }
             }
 
             let data = SummaryData {
-                day_summary: store.get_summary(&day_date, "day"),
-                week_summary: store.get_summary(&week_date, "week"),
+                day_summary: store.as_ref().and_then(|s| s.get_summary(&day_date, "day")),
+                week_summary: store.as_ref().and_then(|s| s.get_summary(&week_date, "week")),
                 day_repos: total_repos,
                 day_commits: total_commits,
                 loading: false,
-                no_api_key: false,
+                no_api_key: !has_key,
             };
             let _ = app.emit("summary-update", &data);
+
+            std::thread::sleep(std::time::Duration::from_secs(
+                config.settings.refresh_interval.max(10),
+            ));
         }
     });
 }
@@ -353,13 +347,6 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
 pub fn get_current_summary(config: &Config) -> SummaryData {
     if !config.settings.summary_enabled {
         return SummaryData::default();
-    }
-
-    let has_key = config.settings.llm_api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false)
-        || std::env::var("DEEPSEEK_API_KEY").map(|k| !k.is_empty()).unwrap_or(false);
-
-    if !has_key {
-        return SummaryData { no_api_key: true, ..SummaryData::default() };
     }
 
     let tz: Tz = config
@@ -375,42 +362,37 @@ pub fn get_current_summary(config: &Config) -> SummaryData {
         config.settings.week_start_day,
     );
 
+    let since_iso = day_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
+    let commits = collect_commits(&config.settings.repos_dir, &since_iso);
+
+    let has_key = config.settings.llm_api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false)
+        || std::env::var("DEEPSEEK_API_KEY").map(|k| !k.is_empty()).unwrap_or(false);
+
     let day_date = day_s.format("%Y-%m-%d").to_string();
     let week_date = week_s.format("%Y-%m-%d").to_string();
 
-    let db_path = config.config_dir.join("summaries.db");
-    if !db_path.exists() {
-        return SummaryData::default();
-    }
-
-    let con = match Connection::open(&db_path) {
-        Ok(c) => c,
-        Err(_) => return SummaryData::default(),
+    let (day_summary, week_summary) = if has_key {
+        let db_path = config.config_dir.join("summaries.db");
+        if db_path.exists() {
+            if let Ok(con) = Connection::open(&db_path) {
+                let ds = con
+                    .prepare("SELECT summary FROM summaries WHERE date = ? AND scope = ?")
+                    .ok()
+                    .and_then(|mut stmt| stmt.query_row(duckdb::params![&day_date, "day"], |row| row.get::<_, String>(0)).ok());
+                let ws = con
+                    .prepare("SELECT summary FROM summaries WHERE date = ? AND scope = ?")
+                    .ok()
+                    .and_then(|mut stmt| stmt.query_row(duckdb::params![&week_date, "week"], |row| row.get::<_, String>(0)).ok());
+                (ds, ws)
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
     };
-
-    let day_summary = con
-        .prepare("SELECT summary FROM summaries WHERE date = ? AND scope = ?")
-        .ok()
-        .and_then(|mut stmt| {
-            stmt.query_row(duckdb::params![&day_date, "day"], |row| {
-                row.get::<_, String>(0)
-            })
-            .ok()
-        });
-
-    let week_summary = con
-        .prepare("SELECT summary FROM summaries WHERE date = ? AND scope = ?")
-        .ok()
-        .and_then(|mut stmt| {
-            stmt.query_row(duckdb::params![&week_date, "week"], |row| {
-                row.get::<_, String>(0)
-            })
-            .ok()
-        });
-
-    // Get today's commit count
-    let since_iso = day_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
-    let commits = collect_commits(&config.settings.repos_dir, &since_iso);
 
     SummaryData {
         day_summary,
@@ -418,6 +400,6 @@ pub fn get_current_summary(config: &Config) -> SummaryData {
         day_repos: commits.len(),
         day_commits: commits.values().map(|v| v.len()).sum(),
         loading: false,
-        no_api_key: false,
+        no_api_key: !has_key,
     }
 }

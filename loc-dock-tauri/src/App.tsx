@@ -73,7 +73,7 @@ function App() {
         summaryVisible={summaryOpen}
       />
       <NotificationBanner visible={summary.no_api_key} onSettings={() => setSettingsOpen(true)} />
-      {summaryOpen && <SummaryPanel summary={summary} />}
+      {summaryOpen && <SummaryPanel summary={summary} range={range} />}
       <Chart stats={stats} mode={mode} range={range} theme={theme} />
       <BottomRow tokens={currentStats?.tokens ?? null} />
       <CostTooltip breakdown={currentStats?.cost_breakdown ?? null} visible={tooltipVisible} />

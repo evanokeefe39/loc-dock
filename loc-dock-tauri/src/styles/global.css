@@ -82,7 +82,7 @@ html, body {
 
 .summary-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr));
   gap: 4px;
 }
 
@@ -137,7 +137,7 @@ html, body {
 }
 
 .highlight-ref {
-  color: var(--loc-add);
+  color: #5b9bf7;
   font-weight: bold;
 }
 

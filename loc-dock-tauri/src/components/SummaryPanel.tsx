@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, ReactNode } from "react";
-import { SummaryData } from "../lib/types";
+import { SummaryData, TimeRange } from "../lib/types";
 
 const REF_PATTERN = /(#\d+|[A-Z][A-Z0-9]+-\d+)/g;
 
@@ -15,16 +15,21 @@ function formatHighlight(text: string): ReactNode {
 
 interface Props {
   summary: SummaryData;
+  range: TimeRange;
 }
 
-export function SummaryPanel({ summary }: Props) {
+export function SummaryPanel({ summary, range }: Props) {
   const [height, setHeight] = useState(100);
   const dragging = useRef(false);
   const startY = useRef(0);
   const startH = useRef(0);
 
-  const hasRepos = summary.repos.length > 0;
-  const hasHighlights = summary.repos.some(r => r.highlights.length > 0);
+  const repos = range === "day" ? summary.day_repos : summary.week_repos;
+  const repoCount = range === "day" ? summary.day_repo_count : summary.week_repo_count;
+  const commits = range === "day" ? summary.day_commits : summary.week_commits;
+  const prs = range === "day" ? summary.day_prs : summary.week_prs;
+
+  const hasRepos = repos.length > 0;
 
   const onResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -35,7 +40,7 @@ export function SummaryPanel({ summary }: Props) {
     const onMove = (ev: MouseEvent) => {
       if (!dragging.current) return;
       const delta = ev.clientY - startY.current;
-      setHeight(Math.max(40, Math.min(300, startH.current + delta)));
+      setHeight(Math.max(40, startH.current + delta));
     };
     const onUp = () => {
       dragging.current = false;
@@ -49,20 +54,20 @@ export function SummaryPanel({ summary }: Props) {
   return (
     <div className="summary-panel">
       <div className="summary-label">
-        {summary.day_commits > 0
-          ? `${summary.day_repos} repo${summary.day_repos !== 1 ? "s" : ""} · ${summary.day_commits} commit${summary.day_commits !== 1 ? "s" : ""}`
-          : "No commits yet today"}
+        {commits > 0
+          ? `${repoCount} repo${repoCount !== 1 ? "s" : ""} · ${commits} commit${commits !== 1 ? "s" : ""}${prs > 0 ? ` · ${prs} PR${prs !== 1 ? "s" : ""}` : ""}`
+          : range === "day" ? "No commits yet today" : "No commits this week"}
       </div>
-      <div className="summary-body" style={{ maxHeight: height }}>
-        {summary.loading && !hasHighlights ? (
+      <div className="summary-body" style={{ height }}>
+        {summary.loading ? (
           <span className="summary-empty">AI summary is being generated...</span>
         ) : summary.no_api_key ? (
           <span className="summary-empty">Configure LLM API key in Settings to enable AI summaries</span>
         ) : !hasRepos ? (
-          <span className="summary-empty">No commits yet today</span>
+          <span className="summary-empty">{range === "day" ? "No commits yet today" : "No commits this week"}</span>
         ) : (
           <div className="summary-cards">
-            {summary.repos.map(repo => (
+            {repos.map(repo => (
               <div key={repo.name} className="summary-card">
                 <div className="card-header">
                   <span className="card-name">{repo.name}</span>

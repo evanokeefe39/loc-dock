@@ -21,6 +21,12 @@ pub struct Settings {
     pub refresh_interval: u64,
     #[serde(default = "default_session_idle_timeout")]
     pub session_idle_timeout: u64,
+    #[serde(default = "default_summary_enabled")]
+    pub summary_enabled: bool,
+    #[serde(default)]
+    pub deepseek_api_key: Option<String>,
+    #[serde(default = "default_summary_debounce_secs")]
+    pub summary_debounce_secs: u64,
 }
 
 pub struct Config {
@@ -99,6 +105,11 @@ impl Settings {
                 .unwrap_or(false),
             refresh_interval: 60,
             session_idle_timeout: 300,
+            summary_enabled: std::env::var("LOCDOCK_SUMMARY_ENABLED")
+                .map(|s| s != "false" && s != "0")
+                .unwrap_or(true),
+            deepseek_api_key: std::env::var("DEEPSEEK_API_KEY").ok(),
+            summary_debounce_secs: 300,
         }
     }
 
@@ -123,6 +134,9 @@ impl Default for Settings {
             autostart: false,
             refresh_interval: 60,
             session_idle_timeout: 300,
+            summary_enabled: true,
+            deepseek_api_key: None,
+            summary_debounce_secs: 300,
         }
     }
 }
@@ -152,5 +166,13 @@ fn default_refresh_interval() -> u64 {
 }
 
 fn default_session_idle_timeout() -> u64 {
+    300
+}
+
+fn default_summary_enabled() -> bool {
+    true
+}
+
+fn default_summary_debounce_secs() -> u64 {
     300
 }

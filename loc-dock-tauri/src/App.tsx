@@ -29,6 +29,7 @@ function App() {
   const [tooltipVisible, setTooltipVisible] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [summaryOpen, setSummaryOpen] = useState(false);
+  const [hideNoPrs, setHideNoPrs] = useState(false);
 
   useEffect(() => {
     if (!shown.current && theme) {
@@ -40,6 +41,12 @@ function App() {
         .catch(() => win.show());
     }
   }, [theme]);
+
+  useEffect(() => {
+    invoke<{ hide_repos_without_prs: boolean }>("get_settings")
+      .then(s => setHideNoPrs(s.hide_repos_without_prs))
+      .catch(() => {});
+  }, [settingsOpen]);
 
   useEffect(() => {
     const unlisten = listen("open-settings", () => setSettingsOpen(true));
@@ -66,7 +73,7 @@ function App() {
         summaryVisible={summaryOpen}
       />
       <NotificationBanner visible={summary.no_api_key} onSettings={() => setSettingsOpen(true)} />
-      {summaryOpen && <SummaryPanel summary={summary} range={range} />}
+      {summaryOpen && <SummaryPanel summary={summary} range={range} hideNoPrs={hideNoPrs} />}
       <Chart stats={stats} mode={mode} range={range} theme={theme} />
       <BottomRow tokens={currentStats?.tokens ?? null} />
       <CostTooltip breakdown={currentStats?.cost_breakdown ?? null} visible={tooltipVisible} />

@@ -34,6 +34,9 @@ iana-time-zone = "0.1"
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
 tauri-plugin-autostart = "2"
 
+[dev-dependencies]
+tempfile = "3"
+
 [profile.release]
 strip = true
 lto = true

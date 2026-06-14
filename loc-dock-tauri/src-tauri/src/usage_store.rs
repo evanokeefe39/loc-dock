@@ -6,8 +6,10 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 const RETENTION_DAYS: f64 = 7.0;
+const DB_NAME: &str = "usage_cache.db";
+const MARKER: &str = "usage_cache.db.reset";
 
-/// In-memory DuckDB store that ingests Claude JSONL usage logs and
+/// File-backed DuckDB store that ingests Claude JSONL usage logs and
 /// exposes aggregation queries for tokens, cost, and session counts.
 pub struct UsageStore {
     con: Connection,
@@ -17,16 +19,58 @@ pub struct UsageStore {
 }
 
 impl UsageStore {
-    /// Create a new store backed by an in-memory DuckDB connection.
-    /// `projects_dir` is typically `~/.claude/projects`.
-    pub fn new(projects_dir: &Path) -> Self {
-        let con = Connection::open_in_memory().expect("failed to open in-memory DuckDB");
+    pub fn new(projects_dir: &Path, cache_dir: &Path) -> Self {
+        let _ = std::fs::create_dir_all(cache_dir);
+
+        let marker = cache_dir.join(MARKER);
+        let db_path = cache_dir.join(DB_NAME);
+        if marker.exists() {
+            let _ = std::fs::remove_file(&db_path);
+            let _ = std::fs::remove_file(&marker);
+            info!("Usage cache reset via marker file");
+        }
+
+        let con = Connection::open(&db_path).expect("failed to open usage_cache.db");
+
+        con.execute_batch(
+            "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        )
+        .expect("failed to create meta table");
+
+        let last_max_mtime: f64 = con
+            .prepare("SELECT value FROM meta WHERE key = 'last_max_mtime'")
+            .ok()
+            .and_then(|mut stmt| {
+                stmt.query_row([], |row| row.get::<_, String>(0)).ok()
+            })
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0);
+
+        let initialized = con
+            .prepare("SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'entries'")
+            .and_then(|mut stmt| stmt.query_row([], |row| row.get::<_, i64>(0)))
+            .unwrap_or(0)
+            > 0;
+
+        if initialized {
+            info!("Usage cache loaded from disk (mtime: {})", last_max_mtime);
+        }
+
         UsageStore {
             con,
-            last_max_mtime: 0.0,
-            initialized: false,
+            last_max_mtime,
+            initialized,
             projects_dir: projects_dir.to_path_buf(),
         }
+    }
+
+    pub fn is_initialized(&self) -> bool {
+        self.initialized
+    }
+
+    pub fn reset(cache_dir: &Path) -> Result<(), String> {
+        let marker = cache_dir.join(MARKER);
+        std::fs::write(&marker, "").map_err(|e| e.to_string())
     }
 
     /// Scan `projects_dir` for JSONL files modified within the retention
@@ -93,7 +137,7 @@ impl UsageStore {
 
         let sql = format!(
             r#"
-            CREATE TEMP TABLE entries AS
+            CREATE OR REPLACE TABLE entries AS
             SELECT ts, src, input_tokens, output_tokens,
                    cache_creation_input_tokens, cache_read_input_tokens
             FROM (
@@ -124,6 +168,11 @@ impl UsageStore {
             Ok(_) => {
                 self.last_max_mtime = max_mtime;
                 self.initialized = true;
+
+                let _ = self.con.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_max_mtime', ?)",
+                    duckdb::params![max_mtime.to_string()],
+                );
 
                 let n: i64 = self
                     .con

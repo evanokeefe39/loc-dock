@@ -47,14 +47,14 @@ html, body {
 /* ── Summary Panel ── */
 .summary-panel {
   flex-shrink: 0;
-  font-size: var(--font-sm);
+  font-size: var(--font-md);
   -webkit-app-region: no-drag;
   overflow: hidden;
 }
 
 .summary-label {
   color: var(--text-dim);
-  font-size: var(--font-sm);
+  font-size: var(--font-md);
   padding: 2px 0;
   white-space: nowrap;
   overflow: hidden;
@@ -73,7 +73,7 @@ html, body {
 
 .summary-body {
   color: var(--text);
-  font-size: var(--font-xs);
+  font-size: var(--font-sm);
   line-height: 1.4;
   padding: 2px 0 4px;
   overflow-y: auto;
@@ -103,7 +103,7 @@ html, body {
 .card-name {
   font-weight: bold;
   color: var(--text);
-  font-size: var(--font-sm);
+  font-size: var(--font-md);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -111,7 +111,7 @@ html, body {
 
 .card-count {
   color: var(--text-dim);
-  font-size: var(--font-sm);
+  font-size: var(--font-md);
   flex-shrink: 0;
   margin-left: 4px;
 }
@@ -124,7 +124,7 @@ html, body {
 }
 .card-highlights li {
   color: var(--text-dim);
-  font-size: var(--font-sm);
+  font-size: var(--font-md);
   line-height: 1.3;
   padding-left: 8px;
   position: relative;
@@ -145,7 +145,7 @@ html, body {
 
 .pr-badge {
   color: #5b9bf7;
-  font-size: var(--font-xs);
+  font-size: var(--font-sm);
   font-weight: bold;
 }
 
@@ -511,6 +511,71 @@ html, body {
   background: var(--text-dim);
   opacity: 0.3;
   margin: 2px 0;
+}
+
+.settings-section-heading {
+  font-size: var(--font-sm);
+  font-weight: bold;
+  color: var(--text);
+  border-bottom: 1px solid rgba(255,255,255,0.15);
+  padding-bottom: 2px;
+  margin-top: 6px;
+}
+
+.settings-actions-row {
+  display: flex;
+  gap: 6px;
+}
+
+.settings-action-btn {
+  background: none;
+  border: 1px solid var(--text-dim);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--font-sm);
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.settings-action-btn:hover:not(:disabled) { background: var(--text-dim); color: var(--bg); }
+.settings-action-btn:disabled { opacity: 0.3; cursor: default; }
+.settings-action-danger { border-color: var(--loc-del); color: var(--loc-del); }
+.settings-action-danger:hover:not(:disabled) { background: var(--loc-del); color: var(--bg); }
+
+.settings-data-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.settings-data-row label {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-inline-reset {
+  background: none;
+  border: 1px solid var(--loc-del);
+  color: var(--loc-del);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: var(--font-xs);
+  padding: 1px 6px;
+  flex-shrink: 0;
+}
+.settings-inline-reset:hover { background: var(--loc-del); color: var(--bg); }
+
+.settings-confirm-modal {
+  border: 1px solid var(--loc-del);
+  padding: 8px;
+  font-size: var(--font-sm);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-confirm-actions {
+  display: flex;
+  gap: 6px;
 }
 
 .settings-restart {

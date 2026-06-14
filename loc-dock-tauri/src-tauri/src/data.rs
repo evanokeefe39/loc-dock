@@ -93,6 +93,7 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
             );
             info!("{}", timing);
             let _ = app.emit("status-update", &timing);
+            crate::summary::perf_log_from(&config.config_dir, &timing);
 
             std::thread::sleep(std::time::Duration::from_secs(config.settings.refresh_interval.max(10)));
         }

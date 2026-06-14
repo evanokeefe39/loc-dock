@@ -1,26 +1,18 @@
 import { useState, useRef, useCallback } from "react";
-import Markdown from "react-markdown";
-import { SummaryData, TimeRange } from "../lib/types";
+import { SummaryData } from "../lib/types";
 
 interface Props {
   summary: SummaryData;
-  range: TimeRange;
 }
 
-export function SummaryPanel({ summary, range }: Props) {
+export function SummaryPanel({ summary }: Props) {
   const [height, setHeight] = useState(100);
   const dragging = useRef(false);
   const startY = useRef(0);
   const startH = useRef(0);
 
-  const text = range === "day" ? summary.day_summary : summary.week_summary;
-
-  const label = range === "day" ? "Today" : "This week";
-  const teaser = summary.loading
-    ? "Summarizing..."
-    : summary.day_commits > 0
-      ? `${label} · ${summary.day_repos} repo${summary.day_repos !== 1 ? "s" : ""} · ${summary.day_commits} commit${summary.day_commits !== 1 ? "s" : ""}`
-      : `${label} · No commits yet`;
+  const hasRepos = summary.repos.length > 0;
+  const hasHighlights = summary.repos.some(r => r.highlights.length > 0);
 
   const onResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -44,20 +36,37 @@ export function SummaryPanel({ summary, range }: Props) {
 
   return (
     <div className="summary-panel">
-      <div className="summary-label">{teaser}</div>
+      <div className="summary-label">
+        {summary.day_commits > 0
+          ? `${summary.day_repos} repo${summary.day_repos !== 1 ? "s" : ""} · ${summary.day_commits} commit${summary.day_commits !== 1 ? "s" : ""}`
+          : "No commits yet today"}
+      </div>
       <div className="summary-body" style={{ maxHeight: height }}>
-        {text
-          ? <Markdown>{text}</Markdown>
-          : <span className="summary-empty">
-              {summary.no_api_key
-                ? "Configure LLM API key in Settings to enable AI summaries"
-                : summary.loading
-                  ? "AI summary is being generated..."
-                  : summary.day_commits > 0
-                    ? "Summary available after next refresh"
-                    : "No commits yet today"}
-            </span>
-        }
+        {summary.loading && !hasHighlights ? (
+          <span className="summary-empty">AI summary is being generated...</span>
+        ) : summary.no_api_key ? (
+          <span className="summary-empty">Configure LLM API key in Settings to enable AI summaries</span>
+        ) : !hasRepos ? (
+          <span className="summary-empty">No commits yet today</span>
+        ) : (
+          <div className="summary-cards">
+            {summary.repos.map(repo => (
+              <div key={repo.name} className="summary-card">
+                <div className="card-header">
+                  <span className="card-name">{repo.name}</span>
+                  <span className="card-count">{repo.commits}</span>
+                </div>
+                {repo.highlights.length > 0 && (
+                  <ul className="card-highlights">
+                    {repo.highlights.map((h, i) => (
+                      <li key={i}>{h}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
       <div className="summary-resize" onMouseDown={onResizeStart} />
     </div>

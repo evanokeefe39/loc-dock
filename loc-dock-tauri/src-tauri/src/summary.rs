@@ -3,23 +3,42 @@ use crate::time_utils;
 use chrono::Utc;
 use chrono_tz::Tz;
 use duckdb::Connection;
-use log::{info, warn};
-use serde::Serialize;
+use log::info;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter};
 
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct RepoSummary {
+    pub name: String,
+    pub commits: usize,
+    pub highlights: Vec<String>,
+}
+
 #[derive(Serialize, Clone, Default)]
 pub struct SummaryData {
-    pub day_summary: Option<String>,
-    pub week_summary: Option<String>,
+    pub repos: Vec<RepoSummary>,
     pub day_repos: usize,
     pub day_commits: usize,
     pub loading: bool,
     pub no_api_key: bool,
+}
+
+pub fn perf_log_from(config_dir: &Path, msg: &str) {
+    perf_log(config_dir, msg);
+}
+
+fn perf_log(config_dir: &Path, msg: &str) {
+    let path = config_dir.join("perf.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let ts = Utc::now().format("%Y-%m-%d %H:%M:%S");
+        let _ = writeln!(f, "[{}] {}", ts, msg);
+    }
 }
 
 struct SummaryStore {
@@ -162,9 +181,12 @@ fn latest_shas(commits: &HashMap<String, Vec<(String, String)>>) -> HashMap<Stri
         .collect()
 }
 
-/// Call an OpenAI-compatible chat completions API.
+/// Call an OpenAI-compatible chat completions API with retry + exponential backoff.
 fn call_llm(api_key: &str, endpoint: &str, model: &str, prompt: &str, content: &str) -> Result<String, String> {
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("Client build failed: {}", e))?;
     let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
     let body = serde_json::json!({
         "model": model,
@@ -173,59 +195,104 @@ fn call_llm(api_key: &str, endpoint: &str, model: &str, prompt: &str, content: &
             { "role": "user", "content": content }
         ],
         "temperature": 0.3,
-        "max_tokens": 1024
+        "max_tokens": 512
     });
 
-    let resp = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .map_err(|e| format!("HTTP request failed: {}", e))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().unwrap_or_default();
-        return Err(format!("API returned {}: {}", status, text));
-    }
-
-    let json: serde_json::Value = resp.json().map_err(|e| format!("JSON parse failed: {}", e))?;
-    json["choices"][0]["message"]["content"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| "No content in API response".to_string())
-}
-
-/// Format commits for the LLM prompt.
-fn format_commits_for_prompt(
-    commits: &HashMap<String, Vec<(String, String)>>,
-    max_messages: usize,
-) -> String {
-    let mut lines = Vec::new();
-    let mut total = 0;
-
-    for (repo, cs) in commits {
-        lines.push(format!("\n## {}", repo));
-        for (_, msg) in cs {
-            if total >= max_messages {
-                lines.push(format!("... and more (truncated at {})", max_messages));
-                return lines.join("\n");
-            }
-            lines.push(format!("- {}", msg));
-            total += 1;
+    let mut last_err = String::new();
+    for attempt in 0..3 {
+        if attempt > 0 {
+            // Exponential backoff with jitter: 1s, 3s base + random 0-1s
+            let base_ms = (1000 * (1 << attempt)) as u64;
+            let jitter_ms = (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_millis() as u64) % 1000;
+            std::thread::sleep(std::time::Duration::from_millis(base_ms + jitter_ms));
+            info!("LLM retry attempt {} after {}ms", attempt + 1, base_ms + jitter_ms);
         }
+
+        let resp = match client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+        {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = format!("HTTP request failed: {}", e);
+                continue;
+            }
+        };
+
+        if resp.status().as_u16() == 429 || resp.status().is_server_error() {
+            last_err = format!("API returned {}", resp.status());
+            continue;
+        }
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().unwrap_or_default();
+            return Err(format!("API returned {}: {}", status, text));
+        }
+
+        let json: serde_json::Value = match resp.json() {
+            Ok(j) => j,
+            Err(e) => {
+                last_err = format!("JSON parse failed: {}", e);
+                continue;
+            }
+        };
+
+        return json["choices"][0]["message"]["content"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| "No content in API response".to_string());
     }
 
-    lines.join("\n")
+    Err(format!("All retries failed: {}", last_err))
 }
 
-const DAY_PROMPT: &str = "Summarize what was accomplished today based on these git commit messages. \
-Group by theme or area of work. Be concise but preserve meaningful detail. Use plain text, no markdown headers.";
 
-const WEEK_PROMPT: &str = "Summarize the week's accomplishments from these daily summaries. \
-Highlight major themes, progress, and completed work. Be concise but don't lose important detail. \
-Use plain text, no markdown headers.";
+const REPO_PROMPT: &str = "You receive git commit messages from a repository. \
+Return a JSON array of 1-4 short highlight strings (max 12 words each). \
+Focus on what changed, not how. No fluff. Example: \
+[\"Added user auth with JWT tokens\",\"Fixed payment webhook retry logic\"]. \
+Return ONLY the JSON array, no other text.";
+
+/// Summarize commits per repo, returning RepoSummary structs.
+fn summarize_repos(
+    commits: &HashMap<String, Vec<(String, String)>>,
+    api_key: &str,
+    endpoint: &str,
+    model: &str,
+) -> Vec<RepoSummary> {
+    let mut results = Vec::new();
+    for (repo, cs) in commits {
+        let msgs: Vec<&str> = cs.iter().map(|(_, m)| m.as_str()).collect();
+        let content = msgs.join("\n");
+        let highlights = match call_llm(api_key, endpoint, model, REPO_PROMPT, &content) {
+            Ok(text) => {
+                let cleaned = text.trim().trim_start_matches("```json").trim_end_matches("```").trim();
+                serde_json::from_str::<Vec<String>>(cleaned).unwrap_or_else(|_| {
+                    // Fallback: split by newline and take first few
+                    cleaned.lines().take(4).map(|l| l.trim().trim_matches('"').to_string()).collect()
+                })
+            }
+            Err(_) => {
+                // Fallback: use first few commit messages as highlights
+                msgs.iter().take(3).map(|m| m.to_string()).collect()
+            }
+        };
+        results.push(RepoSummary {
+            name: repo.clone(),
+            commits: cs.len(),
+            highlights,
+        });
+    }
+    results.sort_by(|a, b| b.commits.cmp(&a.commits));
+    results
+}
 
 /// Main summary loop — runs in its own thread.
 pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
@@ -263,14 +330,8 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
             let now_utc = Utc::now();
             let now_local = now_utc.with_timezone(&tz);
             let day_s = time_utils::day_start(&now_local, config.settings.day_start_hour);
-            let week_s = time_utils::week_start(
-                &now_local,
-                config.settings.day_start_hour,
-                config.settings.week_start_day,
-            );
 
             let day_date = day_s.format("%Y-%m-%d").to_string();
-            let week_date = week_s.format("%Y-%m-%d").to_string();
             let since_iso = day_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
 
             let git_start = Instant::now();
@@ -279,13 +340,24 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
             let total_commits: usize = commits.values().map(|v| v.len()).sum();
             let total_repos = commits.len();
 
+            // Load cached repo summaries from store
+            let cached_repos: Vec<RepoSummary> = store.as_ref()
+                .and_then(|s| s.get_summary(&day_date, "day"))
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .unwrap_or_default();
+
             // Emit current counts immediately (before LLM call)
             let _ = app.emit("summary-update", &SummaryData {
-                day_summary: store.as_ref().and_then(|s| s.get_summary(&day_date, "day")),
-                week_summary: store.as_ref().and_then(|s| s.get_summary(&week_date, "week")),
+                repos: if cached_repos.is_empty() {
+                    commits.iter().map(|(name, cs)| RepoSummary {
+                        name: name.clone(), commits: cs.len(), highlights: vec![],
+                    }).collect()
+                } else {
+                    cached_repos.clone()
+                },
                 day_repos: total_repos,
                 day_commits: total_commits,
-                loading: has_key && !commits.is_empty(),
+                loading: has_key && !commits.is_empty() && cached_repos.is_empty(),
                 no_api_key: !has_key,
             });
 
@@ -299,45 +371,37 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
                     .unwrap_or(true);
 
                 if needs_update && debounce_ok {
-                    let _ = app.emit("status-update", "Generating AI summary...");
+                    let _ = app.emit("status-update", "Generating AI summaries...");
                     info!("Summary: {} repos, {} commits — calling LLM", total_repos, total_commits);
 
                     let llm_start = Instant::now();
-                    let content = format_commits_for_prompt(&commits, 200);
-                    match call_llm(key, &endpoint, &model, DAY_PROMPT, &content) {
-                        Ok(summary) => {
-                            let day_llm_ms = llm_start.elapsed().as_millis();
-                            store.save_summary(&day_date, "day", &summary, &current_shas);
-                            last_call = Some(Instant::now());
-                            info!("Day summary updated in {}ms", day_llm_ms);
+                    let repo_summaries = summarize_repos(&commits, key, &endpoint, &model);
+                    let llm_ms = llm_start.elapsed().as_millis();
 
-                            let week_git_start = Instant::now();
-                            let week_since_iso = week_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
-                            let week_commits = collect_commits(&config.settings.repos_dir, &week_since_iso);
-                            let week_git_ms = week_git_start.elapsed().as_millis();
+                    let json = serde_json::to_string(&repo_summaries).unwrap_or_default();
+                    store.save_summary(&day_date, "day", &json, &current_shas);
+                    last_call = Some(Instant::now());
 
-                            if !week_commits.is_empty() {
-                                let week_llm_start = Instant::now();
-                                let week_content = format_commits_for_prompt(&week_commits, 200);
-                                match call_llm(key, &endpoint, &model, WEEK_PROMPT, &week_content) {
-                                    Ok(week_summary) => {
-                                        let week_llm_ms = week_llm_start.elapsed().as_millis();
-                                        let week_shas = latest_shas(&week_commits);
-                                        store.save_summary(&week_date, "week", &week_summary, &week_shas);
-                                        info!("Week summary updated in {}ms (git:{}ms)", week_llm_ms, week_git_ms);
-                                    }
-                                    Err(e) => warn!("Week summary LLM call failed: {}", e),
-                                }
-                            }
-                        }
-                        Err(e) => warn!("Day summary LLM call failed: {}", e),
-                    }
+                    perf_log(&config.config_dir, &format!(
+                        "LLM summaries: {} repos in {}ms ({} commits)",
+                        repo_summaries.len(), llm_ms, total_commits
+                    ));
+                    info!("Repo summaries updated in {}ms", llm_ms);
                 }
             }
 
+            // Final emit with latest data
+            let final_repos: Vec<RepoSummary> = store.as_ref()
+                .and_then(|s| s.get_summary(&day_date, "day"))
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .unwrap_or_else(|| {
+                    commits.iter().map(|(name, cs)| RepoSummary {
+                        name: name.clone(), commits: cs.len(), highlights: vec![],
+                    }).collect()
+                });
+
             let data = SummaryData {
-                day_summary: store.as_ref().and_then(|s| s.get_summary(&day_date, "day")),
-                week_summary: store.as_ref().and_then(|s| s.get_summary(&week_date, "week")),
+                repos: final_repos,
                 day_repos: total_repos,
                 day_commits: total_commits,
                 loading: false,
@@ -347,6 +411,7 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
 
             let total_ms = cycle_start.elapsed().as_millis();
             let timing = format!("Summary cycle: {}ms (git:{}ms)", total_ms, git_ms);
+            perf_log(&config.config_dir, &timing);
             info!("{}", timing);
             let _ = app.emit("status-update", &timing);
 
@@ -370,11 +435,6 @@ pub fn get_current_summary(config: &Config) -> SummaryData {
         .unwrap_or(chrono_tz::Europe::Berlin);
     let now_local = Utc::now().with_timezone(&tz);
     let day_s = time_utils::day_start(&now_local, config.settings.day_start_hour);
-    let week_s = time_utils::week_start(
-        &now_local,
-        config.settings.day_start_hour,
-        config.settings.week_start_day,
-    );
 
     let since_iso = day_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
     let commits = collect_commits(&config.settings.repos_dir, &since_iso);
@@ -383,36 +443,36 @@ pub fn get_current_summary(config: &Config) -> SummaryData {
         || std::env::var("DEEPSEEK_API_KEY").map(|k| !k.is_empty()).unwrap_or(false);
 
     let day_date = day_s.format("%Y-%m-%d").to_string();
-    let week_date = week_s.format("%Y-%m-%d").to_string();
 
-    let (day_summary, week_summary) = if has_key {
+    let cached_repos: Vec<RepoSummary> = if has_key {
         let db_path = config.config_dir.join("summaries.db");
         if db_path.exists() {
-            if let Ok(con) = Connection::open(&db_path) {
-                let ds = con
-                    .prepare("SELECT summary FROM summaries WHERE date = ? AND scope = ?")
-                    .ok()
-                    .and_then(|mut stmt| stmt.query_row(duckdb::params![&day_date, "day"], |row| row.get::<_, String>(0)).ok());
-                let ws = con
-                    .prepare("SELECT summary FROM summaries WHERE date = ? AND scope = ?")
-                    .ok()
-                    .and_then(|mut stmt| stmt.query_row(duckdb::params![&week_date, "week"], |row| row.get::<_, String>(0)).ok());
-                (ds, ws)
-            } else {
-                (None, None)
-            }
+            Connection::open(&db_path).ok()
+                .and_then(|con| {
+                    con.prepare("SELECT summary FROM summaries WHERE date = ? AND scope = ?").ok()
+                        .and_then(|mut stmt| stmt.query_row(duckdb::params![&day_date, "day"], |row| row.get::<_, String>(0)).ok())
+                })
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .unwrap_or_default()
         } else {
-            (None, None)
+            Vec::new()
         }
     } else {
-        (None, None)
+        Vec::new()
+    };
+
+    let repos = if cached_repos.is_empty() {
+        commits.iter().map(|(name, cs)| RepoSummary {
+            name: name.clone(), commits: cs.len(), highlights: vec![],
+        }).collect()
+    } else {
+        cached_repos
     };
 
     SummaryData {
-        day_summary,
-        week_summary,
         day_repos: commits.len(),
         day_commits: commits.values().map(|v| v.len()).sum(),
+        repos,
         loading: false,
         no_api_key: !has_key,
     }

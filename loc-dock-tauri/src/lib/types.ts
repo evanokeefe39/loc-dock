@@ -68,9 +68,14 @@ export interface Theme {
 export type TimeRange = "day" | "week";
 export type ChartMode = "loc" | "cost" | "tokens";
 
+export interface RepoSummary {
+  name: string;
+  commits: number;
+  highlights: string[];
+}
+
 export interface SummaryData {
-  day_summary: string | null;
-  week_summary: string | null;
+  repos: RepoSummary[];
   day_repos: number;
   day_commits: number;
   loading: boolean;

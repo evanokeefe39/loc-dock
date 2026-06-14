@@ -4,8 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { SummaryData } from "../lib/types";
 
 const DEFAULT: SummaryData = {
-  day_summary: null,
-  week_summary: null,
+  repos: [],
   day_repos: 0,
   day_commits: 0,
   loading: false,

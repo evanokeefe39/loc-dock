@@ -2,13 +2,14 @@ use crate::time_utils;
 use crate::config::Config;
 use crate::git::{self, GitPoint};
 use crate::pricing;
+use crate::task_queue::TaskQueue;
 use crate::types::*;
 use crate::usage_store::UsageStore;
 use chrono::{DateTime, Duration, Timelike, Utc};
 use chrono_tz::Tz;
 use log::info;
 use std::sync::{Arc, RwLock};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 const N_BUCKETS: usize = 48;
 
@@ -18,14 +19,16 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
     std::thread::spawn(move || {
         let mut store = UsageStore::new(&config.projects_dir);
         let tz: Tz = config.settings.timezone.parse().unwrap_or(chrono_tz::Europe::Berlin);
+        let queue = app.state::<TaskQueue>();
 
-        // Wait for frontend to mount before first refresh
         std::thread::sleep(std::time::Duration::from_secs(2));
 
         loop {
             let cycle_start = std::time::Instant::now();
             info!("Data refresh starting");
-            let _ = app.emit("status-update", "Refreshing data...");
+
+            let refresh_id = queue.start("Refreshing data");
+            let _ = app.emit("tasks-changed", ());
 
             let now_utc = Utc::now();
             let now_local = now_utc.with_timezone(&tz);
@@ -35,7 +38,6 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
 
             let since_iso = week_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
 
-            // Parallelize git scan and JSONL load
             let repos_dir = config.settings.repos_dir.clone();
             let since_clone = since_iso.clone();
             let git_handle = std::thread::spawn(move || {
@@ -45,11 +47,9 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
             });
 
             let jsonl_start = std::time::Instant::now();
-            let _ = app.emit("status-update", "Loading session data...");
             let jsonl_rebuilt = store.load();
             let jsonl_ms = jsonl_start.elapsed().as_millis();
 
-            let _ = app.emit("status-update", "Scanning git repos...");
             let (git_points, git_elapsed) = git_handle.join().unwrap_or_else(|_| (Vec::new(), std::time::Duration::ZERO));
             let git_ms = git_elapsed.as_millis();
 
@@ -84,6 +84,9 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
             }
             let _ = app.emit("stats-update", &all);
 
+            queue.complete(refresh_id);
+            let _ = app.emit("tasks-changed", ());
+
             let total_ms = cycle_start.elapsed().as_millis();
             let timing = format!(
                 "Refreshed in {}ms (git:{}ms jsonl:{}ms{} stats:{}ms)",
@@ -92,7 +95,6 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
                 stats_ms
             );
             info!("{}", timing);
-            let _ = app.emit("status-update", &timing);
             crate::summary::perf_log_from(&config.config_dir, &timing);
 
             std::thread::sleep(std::time::Duration::from_secs(config.settings.refresh_interval.max(10)));

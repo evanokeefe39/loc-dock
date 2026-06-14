@@ -18,6 +18,7 @@ interface Settings {
   llm_api_endpoint: string;
   llm_model: string;
   summary_debounce_secs: number;
+  summary_exclude_pattern: string;
 }
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
@@ -256,6 +257,15 @@ export function SettingsPanel({ visible, onClose }: Props) {
             max={3600}
             value={settings.summary_debounce_secs}
             onChange={e => update("summary_debounce_secs", Math.max(60, parseInt(e.target.value) || 300))}
+          />
+        </label>
+
+        <label title="Regex to exclude commit messages from summaries (e.g. ^(chore|docs|style|ci): for conventional commits). Leave empty to include all.">
+          <span>Exclude pattern (regex)</span>
+          <input
+            value={settings.summary_exclude_pattern}
+            onChange={e => update("summary_exclude_pattern", e.target.value)}
+            placeholder="^(chore|docs|style|ci):"
           />
         </label>
 

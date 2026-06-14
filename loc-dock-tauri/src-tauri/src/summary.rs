@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::task_queue::TaskQueue;
 use crate::time_utils;
 use chrono::Utc;
 use chrono_tz::Tz;
@@ -11,7 +12,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Instant;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct RepoSummary {
@@ -119,9 +120,18 @@ fn configure_no_window(cmd: &mut Command) {
 #[cfg(not(target_os = "windows"))]
 fn configure_no_window(_cmd: &mut Command) {}
 
-/// Collect commit (SHA, message) pairs from all repos since `since_iso`.
-/// Returns map of repo_name -> Vec<(sha, message)>.
-fn collect_commits(repos_dir: &Path, since_iso: &str) -> HashMap<String, Vec<(String, String)>> {
+fn collect_commits_filtered(repos_dir: &Path, since_iso: &str, exclude_pattern: &str) -> HashMap<String, Vec<(String, String)>> {
+    let exclude_re = if exclude_pattern.is_empty() {
+        None
+    } else {
+        match regex::Regex::new(exclude_pattern) {
+            Ok(re) => Some(re),
+            Err(e) => {
+                log::warn!("Invalid summary_exclude_pattern '{}': {}", exclude_pattern, e);
+                None
+            }
+        }
+    };
     let mut result: HashMap<String, Vec<(String, String)>> = HashMap::new();
 
     let entries = match std::fs::read_dir(repos_dir) {
@@ -158,7 +168,13 @@ fn collect_commits(repos_dir: &Path, since_iso: &str) -> HashMap<String, Vec<(St
             .filter_map(|line| {
                 let parts: Vec<&str> = line.splitn(2, '|').collect();
                 if parts.len() == 2 {
-                    Some((parts[0].to_string(), parts[1].to_string()))
+                    let msg = parts[1];
+                    if let Some(ref re) = exclude_re {
+                        if re.is_match(msg) {
+                            return None;
+                        }
+                    }
+                    Some((parts[0].to_string(), msg.to_string()))
                 } else {
                     None
                 }
@@ -256,6 +272,8 @@ fn call_llm(api_key: &str, endpoint: &str, model: &str, prompt: &str, content: &
 
 const REPO_PROMPT: &str = "You receive git commit messages from a repository. \
 Return a JSON array of 1-4 short highlight strings (max 12 words each). \
+Order by impact: features and bug fixes first. \
+Skip minor items like docs, chores, formatting, typos, and dependency bumps. \
 Focus on what changed, not how. No fluff. Example: \
 [\"Added user auth with JWT tokens\",\"Fixed payment webhook retry logic\"]. \
 Return ONLY the JSON array, no other text.";
@@ -321,8 +339,8 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
         let store = if has_key { Some(SummaryStore::new(&config.config_dir)) } else { None };
         let debounce_secs = config.settings.summary_debounce_secs.max(60);
         let mut last_call: Option<Instant> = None;
+        let queue = app.state::<TaskQueue>();
 
-        // Short delay for frontend to mount, then run first iteration immediately
         std::thread::sleep(std::time::Duration::from_secs(3));
 
         loop {
@@ -334,19 +352,23 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
             let day_date = day_s.format("%Y-%m-%d").to_string();
             let since_iso = day_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
 
+            let collect_id = queue.start("Collecting commits");
+            let _ = app.emit("tasks-changed", ());
+
             let git_start = Instant::now();
-            let commits = collect_commits(&config.settings.repos_dir, &since_iso);
+            let commits = collect_commits_filtered(&config.settings.repos_dir, &since_iso, &config.settings.summary_exclude_pattern);
             let git_ms = git_start.elapsed().as_millis();
             let total_commits: usize = commits.values().map(|v| v.len()).sum();
             let total_repos = commits.len();
 
-            // Load cached repo summaries from store
+            queue.complete(collect_id);
+            let _ = app.emit("tasks-changed", ());
+
             let cached_repos: Vec<RepoSummary> = store.as_ref()
                 .and_then(|s| s.get_summary(&day_date, "day"))
                 .and_then(|json| serde_json::from_str(&json).ok())
                 .unwrap_or_default();
 
-            // Emit current counts immediately (before LLM call)
             let _ = app.emit("summary-update", &SummaryData {
                 repos: if cached_repos.is_empty() {
                     commits.iter().map(|(name, cs)| RepoSummary {
@@ -361,7 +383,6 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
                 no_api_key: !has_key,
             });
 
-            // LLM summarization (only if API key configured)
             if let (Some(ref key), Some(ref store)) = (&api_key, &store) {
                 let current_shas = latest_shas(&commits);
                 let stored_shas = store.get_repo_shas(&day_date, "day");
@@ -371,7 +392,8 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
                     .unwrap_or(true);
 
                 if needs_update && debounce_ok {
-                    let _ = app.emit("status-update", "Generating AI summaries...");
+                    let llm_id = queue.start("Generating AI summaries");
+                    let _ = app.emit("tasks-changed", ());
                     info!("Summary: {} repos, {} commits — calling LLM", total_repos, total_commits);
 
                     let llm_start = Instant::now();
@@ -382,6 +404,9 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
                     store.save_summary(&day_date, "day", &json, &current_shas);
                     last_call = Some(Instant::now());
 
+                    queue.complete(llm_id);
+                    let _ = app.emit("tasks-changed", ());
+
                     perf_log(&config.config_dir, &format!(
                         "LLM summaries: {} repos in {}ms ({} commits)",
                         repo_summaries.len(), llm_ms, total_commits
@@ -390,7 +415,6 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
                 }
             }
 
-            // Final emit with latest data
             let final_repos: Vec<RepoSummary> = store.as_ref()
                 .and_then(|s| s.get_summary(&day_date, "day"))
                 .and_then(|json| serde_json::from_str(&json).ok())
@@ -413,7 +437,6 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
             let timing = format!("Summary cycle: {}ms (git:{}ms)", total_ms, git_ms);
             perf_log(&config.config_dir, &timing);
             info!("{}", timing);
-            let _ = app.emit("status-update", &timing);
 
             std::thread::sleep(std::time::Duration::from_secs(
                 config.settings.refresh_interval.max(10),
@@ -437,7 +460,7 @@ pub fn get_current_summary(config: &Config) -> SummaryData {
     let day_s = time_utils::day_start(&now_local, config.settings.day_start_hour);
 
     let since_iso = day_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
-    let commits = collect_commits(&config.settings.repos_dir, &since_iso);
+    let commits = collect_commits_filtered(&config.settings.repos_dir, &since_iso, &config.settings.summary_exclude_pattern);
 
     let has_key = config.settings.llm_api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false)
         || std::env::var("DEEPSEEK_API_KEY").map(|k| !k.is_empty()).unwrap_or(false);

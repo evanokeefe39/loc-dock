@@ -4,6 +4,7 @@ mod data;
 mod git;
 mod pricing;
 mod summary;
+mod task_queue;
 mod theme;
 mod time_utils;
 mod tray;
@@ -15,6 +16,7 @@ use data::SharedStats;
 use std::sync::{Arc, RwLock};
 use tauri::{Manager, WindowEvent};
 use tauri_plugin_autostart::MacosLauncher;
+use task_queue::TaskQueue;
 use theme::Theme;
 use types::AllStats;
 
@@ -36,6 +38,7 @@ pub fn run() {
         .manage(theme)
         .manage(stats.clone())
         .manage(config.clone())
+        .manage(TaskQueue::new())
         .invoke_handler(tauri::generate_handler![
             commands::get_theme,
             commands::get_stats,
@@ -44,6 +47,7 @@ pub fn run() {
             commands::save_settings,
             commands::restart_app,
             commands::snap_to_corner,
+            commands::get_active_tasks,
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {

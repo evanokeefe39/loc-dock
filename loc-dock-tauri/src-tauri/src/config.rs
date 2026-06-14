@@ -31,6 +31,8 @@ pub struct Settings {
     pub llm_model: String,
     #[serde(default = "default_summary_debounce_secs")]
     pub summary_debounce_secs: u64,
+    #[serde(default = "default_summary_exclude_pattern")]
+    pub summary_exclude_pattern: String,
 }
 
 pub struct Config {
@@ -120,6 +122,7 @@ impl Settings {
             llm_model: std::env::var("LOCDOCK_LLM_MODEL")
                 .unwrap_or_else(|_| "deepseek-chat".to_string()),
             summary_debounce_secs: 300,
+            summary_exclude_pattern: default_summary_exclude_pattern(),
         }
     }
 
@@ -149,6 +152,7 @@ impl Default for Settings {
             llm_api_endpoint: "https://api.deepseek.com/v1".to_string(),
             llm_model: "deepseek-chat".to_string(),
             summary_debounce_secs: 300,
+            summary_exclude_pattern: default_summary_exclude_pattern(),
         }
     }
 }
@@ -195,4 +199,8 @@ fn default_llm_model() -> String {
 
 fn default_summary_debounce_secs() -> u64 {
     300
+}
+
+fn default_summary_exclude_pattern() -> String {
+    "^(chore|docs|style|ci):".to_string()
 }

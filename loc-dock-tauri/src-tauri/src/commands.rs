@@ -1,6 +1,7 @@
 use crate::config::{Config, Settings};
 use crate::data::SharedStats;
 use crate::summary::{self, SummaryData};
+use crate::task_queue::{ActiveTask, TaskQueue};
 use crate::theme::Theme;
 use crate::types::AllStats;
 use std::sync::Arc;
@@ -51,6 +52,11 @@ pub fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
 #[tauri::command]
 pub fn restart_app(app: AppHandle) {
     app.restart();
+}
+
+#[tauri::command]
+pub fn get_active_tasks(app: AppHandle) -> Vec<ActiveTask> {
+    app.state::<TaskQueue>().active_tasks()
 }
 
 #[tauri::command]

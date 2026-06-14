@@ -228,6 +228,32 @@ html, body {
   font-size: var(--font-sm);
 }
 
+.top-row-stats {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  overflow: hidden;
+  min-width: 0;
+  flex: 1 1 0;
+}
+
+.top-row-controls {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.sessions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+@container dock (max-width: 430px) {
+  .hide-narrow { display: none; }
+}
+
 .loc-add { color: var(--loc-add); font-weight: bold; }
 .loc-del { color: var(--loc-del); font-weight: bold; margin-left: 4px; }
 .cost { color: var(--cost); font-weight: bold; }
@@ -260,10 +286,11 @@ html, body {
   color: var(--text-dim);
   border: 1px solid var(--text-dim);
   font-size: var(--font-xs);
-  padding: 1px 6px;
+  padding: 0px 4px;
   cursor: pointer;
   font-family: inherit;
-  margin-left: 4px;
+  margin-left: 2px;
+  line-height: 1.4;
   -webkit-app-region: no-drag;
 }
 .toggle-btn:hover { color: var(--text); }

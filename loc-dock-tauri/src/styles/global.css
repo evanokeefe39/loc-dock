@@ -47,14 +47,14 @@ html, body {
 /* ── Summary Panel ── */
 .summary-panel {
   flex-shrink: 0;
-  font-size: var(--font-xs);
+  font-size: var(--font-sm);
   -webkit-app-region: no-drag;
   overflow: hidden;
 }
 
 .summary-label {
   color: var(--text-dim);
-  font-size: var(--font-xs);
+  font-size: var(--font-sm);
   padding: 2px 0;
   white-space: nowrap;
   overflow: hidden;
@@ -105,7 +105,7 @@ html, body {
 .card-name {
   font-weight: bold;
   color: var(--text);
-  font-size: var(--font-xs);
+  font-size: var(--font-sm);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -113,7 +113,7 @@ html, body {
 
 .card-count {
   color: var(--text-dim);
-  font-size: var(--font-xs);
+  font-size: var(--font-sm);
   flex-shrink: 0;
   margin-left: 4px;
 }
@@ -126,7 +126,7 @@ html, body {
 }
 .card-highlights li {
   color: var(--text-dim);
-  font-size: 9px;
+  font-size: var(--font-sm);
   line-height: 1.3;
   padding-left: 8px;
   position: relative;
@@ -497,30 +497,31 @@ html, body {
 }
 .cost-tooltip pre { margin: 0; }
 
-/* ── Toast Notifications ── */
-.toast-container {
+/* ── Status Spinner ── */
+.status-spinner {
   position: fixed;
-  bottom: 6px;
-  right: 6px;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
+  bottom: 4px;
+  right: 8px;
   z-index: 500;
-  pointer-events: none;
+  -webkit-app-region: no-drag;
 }
 
-.toast-item {
-  background: rgba(0,0,0,0.8);
-  color: #e0e0e0;
+.spinner-char {
+  color: var(--text-dim);
   font-size: var(--font-sm);
-  padding: 4px 10px;
-  border-radius: 3px;
-  border: 1px solid rgba(255,255,255,0.12);
-  white-space: nowrap;
-  animation: toast-in 0.2s ease-out;
+  cursor: default;
 }
 
-@keyframes toast-in {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
+.spinner-tooltip {
+  position: absolute;
+  bottom: 18px;
+  right: 0;
+  background: rgba(0,0,0,0.9);
+  color: var(--text);
+  font-size: var(--font-sm);
+  padding: 4px 8px;
+  border-radius: 3px;
+  border: 1px solid rgba(255,255,255,0.1);
+  white-space: nowrap;
+  pointer-events: none;
 }

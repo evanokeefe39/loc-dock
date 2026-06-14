@@ -3,19 +3,22 @@ import { listen } from "@tauri-apps/api/event";
 
 const BRAILLE = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+function isCompletion(msg: string) {
+  return msg.startsWith("Refreshed in") || msg.startsWith("Summary cycle:");
+}
+
 export function StatusSpinner() {
   const [jobs, setJobs] = useState<string[]>([]);
   const [frame, setFrame] = useState(0);
-  const [hovered, setHovered] = useState(false);
   const firstLoad = useRef(false);
+  const [hovered, setHovered] = useState(false);
 
   useEffect(() => {
     const unlisten = listen<string>("status-update", (event) => {
       const msg = event.payload;
-      const isComplete = msg.startsWith("Refreshed in") || msg.startsWith("Summary cycle:") || msg === "Data refreshed";
-      if (isComplete) {
+      if (isCompletion(msg)) {
         firstLoad.current = true;
-        setJobs(prev => prev.filter(j => j !== msg));
+        setJobs([]);
       } else {
         setJobs(prev => {
           const next = prev.filter(j => j !== msg);

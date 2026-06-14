@@ -57,7 +57,7 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CXXFLAGS: -D_ITERATOR_DEBUG_LEVEL=0
+          DUCKDB_DOWNLOAD_LIB: 1
         with:
           projectPath: loc-dock-tauri
           tagName: ${{ github.ref_name }}

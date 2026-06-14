@@ -68,5 +68,5 @@ jobs:
       - name: Check Rust
         working-directory: loc-dock-tauri/src-tauri
         env:
-          CXXFLAGS: -D_ITERATOR_DEBUG_LEVEL=0
+          DUCKDB_DOWNLOAD_LIB: 1
         run: cargo check

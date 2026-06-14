@@ -36,7 +36,7 @@ function App() {
     if (!shown.current && theme) {
       shown.current = true;
       const win = getCurrentWindow();
-      win.setSize(new LogicalSize(420, 340))
+      win.setSize(new LogicalSize(500, 340))
         .then(() => invoke("snap_to_corner", { corner: "bottom-right" }))
         .then(() => win.show())
         .catch(() => win.show());

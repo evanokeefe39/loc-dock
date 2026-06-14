@@ -87,7 +87,7 @@ html, body {
 }
 
 .summary-card {
-  flex: 1 1 140px;
+  flex: 0 1 calc(50% - 2px);
   min-width: 120px;
   border: 1px solid rgba(255,255,255,0.08);
   border-radius: 3px;

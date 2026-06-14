@@ -30,6 +30,7 @@ function App() {
   const [mode, setMode] = useState<ChartMode>("loc");
   const [tooltipVisible, setTooltipVisible] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [summaryOpen, setSummaryOpen] = useState(false);
 
   useEffect(() => {
     if (!shown.current && theme) {
@@ -58,7 +59,6 @@ function App() {
 
   return (
     <div className="app" data-tauri-drag-region>
-      <SummaryPanel summary={summary} range={range} />
       <TopRow
         stats={currentStats}
         range={range}
@@ -69,8 +69,11 @@ function App() {
         onSettings={() => setSettingsOpen(true)}
         onClose={handleClose}
         onShowTooltip={setTooltipVisible}
+        onToggleSummary={() => setSummaryOpen(v => !v)}
+        summaryVisible={summaryOpen}
       />
       <NotificationBanner visible={summary.no_api_key} onSettings={() => setSettingsOpen(true)} />
+      {summaryOpen && <SummaryPanel summary={summary} range={range} />}
       <Chart stats={stats} mode={mode} range={range} theme={theme} />
       <BottomRow tokens={currentStats?.tokens ?? null} />
       <CostTooltip breakdown={currentStats?.cost_breakdown ?? null} visible={tooltipVisible} />

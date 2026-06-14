@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Pin, X, Info, Settings } from "lucide-react";
+import { Pin, X, Info, Settings, ScrollText } from "lucide-react";
 import { RangeStats, TimeRange, ChartMode } from "../lib/types";
 import { fmtCost, fmtLoc } from "../lib/format";
 
@@ -15,9 +15,11 @@ interface Props {
   onSettings: () => void;
   onClose: () => void;
   onShowTooltip: (show: boolean) => void;
+  onToggleSummary: () => void;
+  summaryVisible: boolean;
 }
 
-export function TopRow({ stats, range, mode, onToggleRange, onToggleMode, onSnapTo, onSettings, onClose, onShowTooltip }: Props) {
+export function TopRow({ stats, range, mode, onToggleRange, onToggleMode, onSnapTo, onSettings, onClose, onShowTooltip, onToggleSummary, summaryVisible }: Props) {
   const s = stats;
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -35,6 +37,10 @@ export function TopRow({ stats, range, mode, onToggleRange, onToggleMode, onSnap
 
   return (
     <div className="top-row">
+      <button className={`icon-btn ${summaryVisible ? "active" : ""}`} onClick={onToggleSummary} title="AI Summary">
+        <ScrollText size={12} />
+      </button>
+      <span className="sep" />
       <span className="loc-add">+{s ? fmtLoc(s.loc_added) : "0"}</span>
       <span className="loc-del">-{s ? fmtLoc(s.loc_deleted) : "0"}</span>
       <span className="sep" />

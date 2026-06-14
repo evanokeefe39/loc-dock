@@ -19,6 +19,9 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
         let mut store = UsageStore::new(&config.projects_dir);
         let tz: Tz = config.settings.timezone.parse().unwrap_or(chrono_tz::Europe::Berlin);
 
+        // Wait for frontend to mount before first refresh
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
         loop {
             info!("Data refresh starting");
             let _ = app.emit("status-update", "Refreshing data...");

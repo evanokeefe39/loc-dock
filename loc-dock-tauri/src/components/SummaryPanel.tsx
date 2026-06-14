@@ -1,5 +1,4 @@
 import { useState, useRef, useCallback } from "react";
-import { ChevronDown, ChevronUp } from "lucide-react";
 import Markdown from "react-markdown";
 import { SummaryData, TimeRange } from "../lib/types";
 
@@ -9,20 +8,19 @@ interface Props {
 }
 
 export function SummaryPanel({ summary, range }: Props) {
-  const [expanded, setExpanded] = useState(false);
   const [height, setHeight] = useState(100);
   const dragging = useRef(false);
   const startY = useRef(0);
   const startH = useRef(0);
 
   const text = range === "day" ? summary.day_summary : summary.week_summary;
-  const hasContent = text !== null;
 
-  if (!hasContent && !summary.loading && summary.day_commits === 0) return null;
-
+  const label = range === "day" ? "Today" : "This week";
   const teaser = summary.loading
     ? "Summarizing..."
-    : `${summary.day_repos} repo${summary.day_repos !== 1 ? "s" : ""} · ${summary.day_commits} commit${summary.day_commits !== 1 ? "s" : ""}`;
+    : summary.day_commits > 0
+      ? `${label} · ${summary.day_repos} repo${summary.day_repos !== 1 ? "s" : ""} · ${summary.day_commits} commit${summary.day_commits !== 1 ? "s" : ""}`
+      : `${label} · No commits yet`;
 
   const onResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -45,22 +43,19 @@ export function SummaryPanel({ summary, range }: Props) {
   }, [height]);
 
   return (
-    <div className={`summary-panel ${expanded ? "expanded" : ""}`}>
-      <button
-        className="summary-header"
-        onClick={() => setExpanded(!expanded)}
-      >
-        <span className="summary-teaser">{teaser}</span>
-        {expanded ? <ChevronDown size={12} /> : <ChevronUp size={12} />}
-      </button>
-      {expanded && text && (
-        <>
-          <div className="summary-body" style={{ maxHeight: height }}>
-            <Markdown>{text}</Markdown>
-          </div>
-          <div className="summary-resize" onMouseDown={onResizeStart} />
-        </>
-      )}
+    <div className="summary-panel">
+      <div className="summary-label">{teaser}</div>
+      <div className="summary-body" style={{ maxHeight: height }}>
+        {text
+          ? <Markdown>{text}</Markdown>
+          : <span className="summary-empty">
+              {summary.no_api_key
+                ? "Configure LLM API key in Settings to enable AI summaries"
+                : summary.loading ? "Generating summary..." : "Waiting for commits..."}
+            </span>
+        }
+      </div>
+      <div className="summary-resize" onMouseDown={onResizeStart} />
     </div>
   );
 }

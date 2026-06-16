@@ -31,7 +31,7 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
             (Box::new(claude_discoverer), SourceKind::Claude),
             (Box::new(pi_discoverer), SourceKind::Pi),
         ]);
-        let mut store = UsageStore::new(source_manager, &config.settings.usage_cache_dir);
+        let mut store = UsageStore::new(source_manager, &config.settings.usage_cache_dir, config.pricing.clone(), &config.config_dir);
         let tz: Tz = config.settings.timezone.parse().unwrap_or(chrono_tz::UTC);
         let queue = app.state::<TaskQueue>();
 
@@ -82,8 +82,8 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
             // Emit cached stats from previous cycle immediately (< 1ms)
             // so the user never sees a blank screen.
             // First time through, this shows the pre-filled aggregates (real data).
-            if let Ok(cached) = stats.read() {
-                let _ = app.emit("stats-update", &*cached);
+            if stats.read().is_ok() {
+                let _ = app.emit("tasks-changed", ());
             }
 
             let now_local = Utc::now().with_timezone(&tz);
@@ -143,7 +143,6 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
                     if let Ok(mut locked) = stats.write() {
                         *locked = s.clone();
                     }
-                    let _ = app.emit("stats-update", &s);
                 };
             }
             emit!();

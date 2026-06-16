@@ -1,3 +1,4 @@
+use crate::pricing::Pricing;
 use crate::source_adapter::{FileDiscoverer, SourceKind, SourceManager};
 use crate::types::{CostBreakdown, SourceStats, TokenTotals};
 use chrono::{DateTime, Utc};
@@ -20,6 +21,62 @@ const SCHEMA_VERSION: &str = "7";  // V2: SQL ingest; bumped to recover from poi
 const INGEST_BATCH_FILES: usize = 8;
 const MAX_OBJECT_SIZE: u64 = 64 * 1024 * 1024;  // 64 MB; default 16 MB too small (edge case)
 
+// ── SQL template loading ────────────────────────────────────────────────────
+//
+// Silver extraction SQL is loaded from .sql template files, with user overrides
+// in the config dir. Users can edit these files when JSONL schema changes without
+// recompiling the app. See: sql/claude-silver.sql, sql/pi-silver.sql
+
+struct SqlTemplates {
+    claude_silver: String,
+    pi_silver: String,
+}
+
+impl SqlTemplates {
+    fn load(config_dir: &Path) -> Self {
+        let bundled_claude = include_str!("../sql/claude-silver.sql");
+        let bundled_pi = include_str!("../sql/pi-silver.sql");
+        let sql_dir = config_dir.join("sql");
+        SqlTemplates {
+            claude_silver: load_or_fallback(&sql_dir.join("claude-silver.sql"), bundled_claude),
+            pi_silver: load_or_fallback(&sql_dir.join("pi-silver.sql"), bundled_pi),
+        }
+    }
+
+    fn format_claude(&self, paths_array: &str, pricing: &Pricing) -> String {
+        self.claude_silver
+            .replace("{PATHS}", paths_array)
+            .replace("{INPUT_PRICE}", &pricing.input_price.to_string())
+            .replace("{OUTPUT_PRICE}", &pricing.output_price.to_string())
+            .replace("{CACHE_WRITE_PRICE}", &pricing.cache_write_price.to_string())
+            .replace("{CACHE_READ_PRICE}", &pricing.cache_read_price.to_string())
+            .replace("{MAX_OBJECT_SIZE}", &MAX_OBJECT_SIZE.to_string())
+    }
+
+    fn format_pi(&self, paths_array: &str, pricing: &Pricing) -> String {
+        self.pi_silver
+            .replace("{PATHS}", paths_array)
+            .replace("{INPUT_PRICE}", &pricing.input_price.to_string())
+            .replace("{OUTPUT_PRICE}", &pricing.output_price.to_string())
+            .replace("{CACHE_WRITE_PRICE}", &pricing.cache_write_price.to_string())
+            .replace("{CACHE_READ_PRICE}", &pricing.cache_read_price.to_string())
+            .replace("{MAX_OBJECT_SIZE}", &MAX_OBJECT_SIZE.to_string())
+    }
+}
+
+fn load_or_fallback(path: &Path, bundled: &str) -> String {
+    if path.exists() {
+        match std::fs::read_to_string(path) {
+            Ok(content) => {
+                log::info!("Loaded SQL template from {}", path.display());
+                return content;
+            }
+            Err(e) => log::warn!("Failed to read {}, using bundled: {}", path.display(), e),
+        }
+    }
+    bundled.to_string()
+}
+
 // ponytail: kept for future use; per-source ETL in data loop doesn't need this
 #[allow(dead_code)]
 #[derive(Default, Debug)]
@@ -41,14 +98,17 @@ pub struct EtlResult {
 pub struct UsageStore {
     con: Connection,
     source_manager: SourceManager,
+    pricing: Pricing,
+    sql_templates: SqlTemplates,
     initialized: bool,
     /// Row count at last check — used to detect new data and skip aggregate refresh.
     last_row_count: u64,
 }
 
 impl UsageStore {
-    pub fn new(source_manager: SourceManager, cache_dir: &Path) -> Self {
+    pub fn new(source_manager: SourceManager, cache_dir: &Path, pricing: Pricing, config_dir: &Path) -> Self {
         let _ = std::fs::create_dir_all(cache_dir);
+        let sql_templates = SqlTemplates::load(config_dir);
 
         let marker = cache_dir.join(MARKER);
         let db_path = cache_dir.join(DB_NAME);
@@ -173,6 +233,8 @@ impl UsageStore {
         UsageStore {
             con,
             source_manager,
+            pricing,
+            sql_templates,
             initialized,
             last_row_count: row_count as u64,
         }
@@ -201,7 +263,7 @@ impl UsageStore {
 
         for pair in &self.source_manager.pairs {
             if pair.1.name() == name {
-                let n = process_source(&self.con, &*pair.0, pair.1, cutoff)?;
+                let n = process_source(&self.con, &*pair.0, pair.1, cutoff, &self.pricing, &self.sql_templates)?;
                 self.initialized = true;
                 return Ok(n);
             }
@@ -276,6 +338,8 @@ fn process_source(
     discoverer: &dyn FileDiscoverer,
     kind: SourceKind,
     cutoff: f64,
+    pricing: &Pricing,
+    templates: &SqlTemplates,
 ) -> Result<usize, String> {
     let (all_files, _max_mtime) = match discoverer.discover_files(cutoff) {
         Ok(r) => r,
@@ -323,7 +387,7 @@ fn process_source(
     let mut failed = 0usize;
     for chunk in changed.chunks(batch_files) {
         let paths: Vec<PathBuf> = chunk.iter().map(|(p, ..)| p.clone()).collect();
-        match ingest_files(con, kind, &paths) {
+        match ingest_files(con, kind, &paths, pricing, templates) {
             Ok(n) => {
                 total += n;
                 // Stamp only this batch's files now that its ingest committed; a
@@ -365,14 +429,14 @@ fn file_unchanged(con: &Connection, key: &str, mtime: f64, size: i64) -> bool {
 
 /// Build the bronze→silver SQL for a batch of files and execute it.
 /// Returns the number of rows inserted (INSERT OR IGNORE skips duplicates).
-fn ingest_files(con: &Connection, kind: SourceKind, paths: &[PathBuf]) -> Result<usize, String> {
+fn ingest_files(con: &Connection, kind: SourceKind, paths: &[PathBuf], pricing: &Pricing, templates: &SqlTemplates) -> Result<usize, String> {
     if paths.is_empty() {
         return Ok(0);
     }
     let paths_array = paths_to_sql_array(paths);
     let sql = match kind {
-        SourceKind::Claude => claude_silver_sql(&paths_array),
-        SourceKind::Pi => pi_silver_sql(&paths_array),
+        SourceKind::Claude => templates.format_claude(&paths_array, pricing),
+        SourceKind::Pi => templates.format_pi(&paths_array, pricing),
     };
 
     if kind == SourceKind::Pi {
@@ -418,138 +482,9 @@ fn paths_to_sql_array(paths: &[PathBuf]) -> String {
         .join(", ")
 }
 
-/// Claude silver extraction. Assistant messages carry usage; cost is flat-priced
-/// in SQL. The `input>0 OR output>0` guard replicates `fill_costs` exactly (incl.
-/// its cache-only-row zero-cost gap — a latent bug kept for parity; see plan).
-fn claude_silver_sql(paths_array: &str) -> String {
-    let ip = crate::pricing::INPUT_PRICE;
-    let op = crate::pricing::OUTPUT_PRICE;
-    let cwp = crate::pricing::CACHE_WRITE_PRICE;
-    let crp = crate::pricing::CACHE_READ_PRICE;
-    format!(
-        "INSERT OR IGNORE INTO entries
-           (source, session_id, ts, model, provider, role,
-            input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
-            input_cost, output_cost, cache_write_cost, cache_read_cost, total_cost, file_path)
-         WITH bronze AS (
-           SELECT json AS j, replace(filename, '\\', '/') AS file_path
-           FROM read_ndjson_objects([{paths}],
-                  filename = true, ignore_errors = true, maximum_object_size = {mos})
-         ),
-         ex AS (
-           SELECT
-             COALESCE(json_extract_string(j, '$.sessionId'),
-                      regexp_extract(file_path, '([^/]+)\\.jsonl$', 1)) AS session_id,
-             TRY_CAST(json_extract_string(j, '$.timestamp') AS TIMESTAMP) AS ts,
-             json_extract_string(j, '$.message.model') AS model,
-             COALESCE(TRY_CAST(json_extract_string(j, '$.message.usage.input_tokens')  AS BIGINT), 0) AS input_tokens,
-             COALESCE(TRY_CAST(json_extract_string(j, '$.message.usage.output_tokens') AS BIGINT), 0) AS output_tokens,
-             COALESCE(TRY_CAST(json_extract_string(j, '$.message.usage.cache_creation_input_tokens') AS BIGINT), 0) AS cache_creation_input_tokens,
-             COALESCE(TRY_CAST(json_extract_string(j, '$.message.usage.cache_read_input_tokens')     AS BIGINT), 0) AS cache_read_input_tokens,
-             file_path
-           FROM bronze
-           WHERE json_extract_string(j, '$.type') = 'assistant'
-             AND json_extract(j, '$.message.usage') IS NOT NULL
-         )
-         SELECT
-           'claude', session_id, ts, model, 'anthropic', 'assistant',
-           input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
-           CASE WHEN input_tokens > 0 OR output_tokens > 0 THEN input_tokens / 1e6 * {ip} ELSE 0 END,
-           CASE WHEN input_tokens > 0 OR output_tokens > 0 THEN output_tokens / 1e6 * {op} ELSE 0 END,
-           CASE WHEN input_tokens > 0 OR output_tokens > 0 THEN cache_creation_input_tokens / 1e6 * {cwp} ELSE 0 END,
-           CASE WHEN input_tokens > 0 OR output_tokens > 0 THEN cache_read_input_tokens / 1e6 * {crp} ELSE 0 END,
-           CASE WHEN input_tokens > 0 OR output_tokens > 0
-                THEN input_tokens / 1e6 * {ip} + output_tokens / 1e6 * {op}
-                   + cache_creation_input_tokens / 1e6 * {cwp} + cache_read_input_tokens / 1e6 * {crp}
-                ELSE 0 END,
-           file_path
-         FROM ex
-         WHERE ts IS NOT NULL",
-        paths = paths_array, mos = MAX_OBJECT_SIZE, ip = ip, op = op, cwp = cwp, crp = crp,
-    )
-}
-
-/// Pi silver extraction. Pi uses camelCase token fields and carries its own cost
-/// nested under `usage.cost`. `model_change` events set the active model/provider,
-/// carried forward to subsequent assistant rows via a window LAST_VALUE. Flat
-/// pricing is applied only when Pi supplied no total cost (matches `fill_costs`).
-fn pi_silver_sql(paths_array: &str) -> String {
-    let ip = crate::pricing::INPUT_PRICE;
-    let op = crate::pricing::OUTPUT_PRICE;
-    let cwp = crate::pricing::CACHE_WRITE_PRICE;
-    let crp = crate::pricing::CACHE_READ_PRICE;
-    format!(
-        "INSERT OR IGNORE INTO entries
-           (source, session_id, ts, model, provider, role,
-            input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
-            input_cost, output_cost, cache_write_cost, cache_read_cost, total_cost, file_path)
-         WITH bronze AS (
-           SELECT json AS j, replace(filename, '\\', '/') AS file_path,
-                  row_number() OVER () AS rn
-           FROM read_ndjson_objects([{paths}],
-                  filename = true, ignore_errors = true, maximum_object_size = {mos})
-         ),
-         carried AS (
-           SELECT *,
-             LAST_VALUE(CASE WHEN json_extract_string(j, '$.type') = 'model_change'
-                             THEN json_extract_string(j, '$.modelId') END IGNORE NULLS)
-               OVER (ORDER BY rn ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS carried_model,
-             LAST_VALUE(CASE WHEN json_extract_string(j, '$.type') = 'model_change'
-                             THEN json_extract_string(j, '$.provider') END IGNORE NULLS)
-               OVER (ORDER BY rn ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS carried_provider
-           FROM bronze
-         ),
-         ex AS (
-           SELECT
-             split_part(regexp_extract(file_path, '([^/]+)\\.jsonl$', 1), '_', 2) AS session_id,
-             COALESCE(
-               CASE WHEN TRY_CAST(json_extract_string(j, '$.message.timestamp') AS BIGINT) IS NOT NULL
-                    THEN to_timestamp(TRY_CAST(json_extract_string(j, '$.message.timestamp') AS BIGINT) / 1000.0) AT TIME ZONE 'UTC'
-               END,
-               TRY_CAST(json_extract_string(j, '$.timestamp') AS TIMESTAMP)
-             ) AS ts,
-             COALESCE(json_extract_string(j, '$.message.model'), carried_model) AS model,
-             COALESCE(json_extract_string(j, '$.message.provider'), carried_provider) AS provider,
-             COALESCE(TRY_CAST(json_extract_string(j, '$.message.usage.input')      AS BIGINT), 0) AS input_tokens,
-             COALESCE(TRY_CAST(json_extract_string(j, '$.message.usage.output')     AS BIGINT), 0) AS output_tokens,
-             COALESCE(TRY_CAST(json_extract_string(j, '$.message.usage.cacheWrite') AS BIGINT), 0) AS cache_creation_input_tokens,
-             COALESCE(TRY_CAST(json_extract_string(j, '$.message.usage.cacheRead')  AS BIGINT), 0) AS cache_read_input_tokens,
-             COALESCE(TRY_CAST(json_extract_string(j, '$.message.usage.cost.input')      AS DOUBLE), 0) AS p_input_cost,
-             COALESCE(TRY_CAST(json_extract_string(j, '$.message.usage.cost.output')     AS DOUBLE), 0) AS p_output_cost,
-             COALESCE(TRY_CAST(json_extract_string(j, '$.message.usage.cost.cacheWrite') AS DOUBLE), 0) AS p_cache_write_cost,
-             COALESCE(TRY_CAST(json_extract_string(j, '$.message.usage.cost.cacheRead')  AS DOUBLE), 0) AS p_cache_read_cost,
-             COALESCE(TRY_CAST(json_extract_string(j, '$.message.usage.cost.total')      AS DOUBLE), 0) AS p_total_cost,
-             file_path
-           FROM carried
-           WHERE json_extract_string(j, '$.type') = 'message'
-             AND json_extract_string(j, '$.message.role') = 'assistant'
-             AND json_extract(j, '$.message.usage') IS NOT NULL
-         )
-         SELECT
-           'pi', session_id, ts, model, provider, 'assistant',
-           input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
-           CASE WHEN p_total_cost = 0 AND (input_tokens > 0 OR output_tokens > 0)
-                THEN input_tokens / 1e6 * {ip} ELSE p_input_cost END,
-           CASE WHEN p_total_cost = 0 AND (input_tokens > 0 OR output_tokens > 0)
-                THEN output_tokens / 1e6 * {op} ELSE p_output_cost END,
-           CASE WHEN p_total_cost = 0 AND (input_tokens > 0 OR output_tokens > 0)
-                THEN cache_creation_input_tokens / 1e6 * {cwp} ELSE p_cache_write_cost END,
-           CASE WHEN p_total_cost = 0 AND (input_tokens > 0 OR output_tokens > 0)
-                THEN cache_read_input_tokens / 1e6 * {crp} ELSE p_cache_read_cost END,
-           CASE WHEN p_total_cost = 0 AND (input_tokens > 0 OR output_tokens > 0)
-                THEN input_tokens / 1e6 * {ip} + output_tokens / 1e6 * {op}
-                   + cache_creation_input_tokens / 1e6 * {cwp} + cache_read_input_tokens / 1e6 * {crp}
-                ELSE p_total_cost END,
-           file_path
-         FROM ex
-         WHERE ts IS NOT NULL",
-        paths = paths_array, mos = MAX_OBJECT_SIZE, ip = ip, op = op, cwp = cwp, crp = crp,
-    )
-}
-
 impl UsageStore {
 
-        /// Recompute daily_aggregates from the entries table.
+    /// Recompute daily_aggregates from the entries table.
     /// Called after each ETL cycle that inserted new rows.
     /// Uses REPLACE semantics (ON CONFLICT DO UPDATE SET = EXCLUDED.*)
     /// since this is a full recompute of the retention window.
@@ -788,7 +723,6 @@ impl UsageStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pricing::{CACHE_READ_PRICE, CACHE_WRITE_PRICE, INPUT_PRICE, OUTPUT_PRICE};
     use crate::source_adapter::GlobFileDiscoverer;
 
     const ENTRIES_DDL: &str = "CREATE TABLE entries (
@@ -814,6 +748,15 @@ mod tests {
         con
     }
 
+    fn test_pricing() -> Pricing {
+        Pricing::default()
+    }
+
+    fn test_templates() -> SqlTemplates {
+        let dir = std::env::temp_dir().join("locdock_test_sql");
+        SqlTemplates::load(&dir)
+    }
+
     /// Write a fixture JSONL file under a unique temp dir; returns its path.
     fn write_fixture(name: &str, content: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -834,6 +777,8 @@ mod tests {
     #[test]
     fn claude_silver_parity_and_idempotency() {
         let con = test_con();
+        let pricing = test_pricing();
+        let templates = test_templates();
         // 2 valid assistant rows (one with io tokens, one cache-only), plus rows that
         // must be skipped: user type, assistant w/o usage, and a malformed line.
         let content = "\
@@ -845,7 +790,7 @@ mod tests {
 ";
         let path = write_fixture("claude.jsonl", content);
 
-        let n = ingest_files(&con, SourceKind::Claude, std::slice::from_ref(&path)).unwrap();
+        let n = ingest_files(&con, SourceKind::Claude, std::slice::from_ref(&path), &pricing, &templates).unwrap();
         assert_eq!(n, 2, "only the 2 assistant-with-usage rows ingest");
 
         let count: i64 = con.query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0)).unwrap();
@@ -863,8 +808,8 @@ mod tests {
         let io_total: f64 = con
             .query_row("SELECT total_cost FROM entries WHERE input_tokens = 100", [], |r| r.get(0)).unwrap();
         approx(io_total,
-            100.0 / 1e6 * INPUT_PRICE + 50.0 / 1e6 * OUTPUT_PRICE
-            + 10.0 / 1e6 * CACHE_WRITE_PRICE + 5.0 / 1e6 * CACHE_READ_PRICE);
+            100.0 / 1e6 * pricing.input_price + 50.0 / 1e6 * pricing.output_price
+            + 10.0 / 1e6 * pricing.cache_write_price + 5.0 / 1e6 * pricing.cache_read_price);
         let cacheonly_total: f64 = con
             .query_row("SELECT total_cost FROM entries WHERE cache_read_input_tokens = 1000", [], |r| r.get(0)).unwrap();
         approx(cacheonly_total, 0.0);
@@ -877,7 +822,7 @@ mod tests {
                    ("s1", "claude-x", "anthropic", "assistant"));
 
         // Idempotency: re-ingest inserts nothing.
-        let n2 = ingest_files(&con, SourceKind::Claude, std::slice::from_ref(&path)).unwrap();
+        let n2 = ingest_files(&con, SourceKind::Claude, std::slice::from_ref(&path), &pricing, &templates).unwrap();
         assert_eq!(n2, 0, "re-ingest is a no-op");
         let count2: i64 = con.query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0)).unwrap();
         assert_eq!(count2, 2);
@@ -888,6 +833,8 @@ mod tests {
     #[test]
     fn pi_silver_model_carryforward_and_cost() {
         let con = test_con();
+        let pricing = test_pricing();
+        let templates = test_templates();
         // model_change(alpha) → assistant (no model, no cost → carries alpha, flat-priced)
         // model_change(beta)  → assistant (explicit model gamma, parsed cost 0.5 → kept)
         // a user message is skipped.
@@ -900,7 +847,7 @@ mod tests {
 ";
         let path = write_fixture("agent_sessABC_2023.jsonl", content);
 
-        let n = ingest_files(&con, SourceKind::Pi, std::slice::from_ref(&path)).unwrap();
+        let n = ingest_files(&con, SourceKind::Pi, std::slice::from_ref(&path), &pricing, &templates).unwrap();
         assert_eq!(n, 2, "two assistant messages ingest");
 
         // session_id derived from filename: split on '_' → element 2.
@@ -918,7 +865,7 @@ mod tests {
         // first row: no parsed cost → flat-priced. second: parsed total kept.
         let alpha_total: f64 = con
             .query_row("SELECT total_cost FROM entries WHERE model = 'alpha'", [], |r| r.get(0)).unwrap();
-        approx(alpha_total, 10.0 / 1e6 * INPUT_PRICE + 20.0 / 1e6 * OUTPUT_PRICE);
+        approx(alpha_total, 10.0 / 1e6 * pricing.input_price + 20.0 / 1e6 * pricing.output_price);
         let gamma_total: f64 = con
             .query_row("SELECT total_cost FROM entries WHERE model = 'gamma'", [], |r| r.get(0)).unwrap();
         approx(gamma_total, 0.5);
@@ -967,6 +914,8 @@ mod tests {
     #[test]
     fn registry_skips_unchanged_and_reingests_on_change() {
         let con = test_con();
+        let pricing = test_pricing();
+        let templates = test_templates();
         let dir = std::env::temp_dir().join(format!(
             "locdock_reg_{}_{}", std::process::id(),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
@@ -978,11 +927,11 @@ mod tests {
         let disc = GlobFileDiscoverer::new(dir.clone(), vec![]);
 
         // First cycle ingests the one row.
-        let n1 = process_source(&con, &disc, SourceKind::Claude, 0.0).unwrap();
+        let n1 = process_source(&con, &disc, SourceKind::Claude, 0.0, &pricing, &templates).unwrap();
         assert_eq!(n1, 1);
 
         // Second cycle: file unchanged → skipped, nothing ingested.
-        let n2 = process_source(&con, &disc, SourceKind::Claude, 0.0).unwrap();
+        let n2 = process_source(&con, &disc, SourceKind::Claude, 0.0, &pricing, &templates).unwrap();
         assert_eq!(n2, 0);
 
         // Append a second row → mtime+size change → whole-file re-read; old row
@@ -990,7 +939,7 @@ mod tests {
         let row2 = "{\"type\":\"assistant\",\"sessionId\":\"s1\",\"timestamp\":\"2024-01-02T03:05:05Z\",\"message\":{\"model\":\"m\",\"usage\":{\"input_tokens\":2,\"output_tokens\":2}}}\n";
         std::fs::write(&file, format!("{row1}{row2}")).unwrap();
 
-        let n3 = process_source(&con, &disc, SourceKind::Claude, 0.0).unwrap();
+        let n3 = process_source(&con, &disc, SourceKind::Claude, 0.0, &pricing, &templates).unwrap();
         assert_eq!(n3, 1, "only the newly appended row inserts");
 
         let count: i64 = con.query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0)).unwrap();

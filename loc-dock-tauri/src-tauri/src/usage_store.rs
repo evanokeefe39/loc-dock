@@ -10,6 +10,8 @@ use std::time::SystemTime;
 
 const RETENTION_DAYS: f64 = 7.0;
 const DAY_SECS: f64 = 86400.0;
+/// Timeline resolution — must match `data.rs::N_BUCKETS` (frontend expects this many).
+const N_BUCKETS: usize = 48;
 const DB_NAME: &str = "usage_cache.db";
 const MARKER: &str = "usage_cache.db.reset";
 const SCHEMA_VERSION: &str = "6";  // V2: SQL silver ingest, no Rust parsers / file_tracker
@@ -54,8 +56,6 @@ pub struct UsageStore {
 struct QueryCache {
     token_totals: HashMap<String, (u64, TokenTotals)>,
     cost_breakdowns: HashMap<String, (u64, CostBreakdown)>,
-    cost_timelines: HashMap<String, (u64, Vec<(f64, f64)>)>,
-    token_timelines: HashMap<String, (u64, Vec<(f64, i64, i64, i64, i64)>)>,
     session_counts: HashMap<(String, String), (u64, (i64, i64))>,
     source_breakdowns: HashMap<(String, String), (u64, Vec<SourceStats>)>,
 }
@@ -64,8 +64,6 @@ impl QueryCache {
     fn clear(&mut self) {
         self.token_totals.clear();
         self.cost_breakdowns.clear();
-        self.cost_timelines.clear();
-        self.token_timelines.clear();
         self.session_counts.clear();
         self.source_breakdowns.clear();
     }
@@ -343,6 +341,20 @@ fn ingest_files(con: &Connection, kind: SourceKind, paths: &[PathBuf]) -> Result
         Ok(n) => Ok(n),
         Err(e) => { warn!("ETL '{}': ingest insert: {}", kind.name(), e); Ok(0) }
     }
+}
+
+/// Build a timeline-bucketing query: assign each `entries` row in [lo, hi) to one
+/// of `N_BUCKETS` equal slices and aggregate `measures` per bucket. Params, in order:
+/// `lo`, `binsize` (=(hi-lo)/N_BUCKETS), `lo`, `hi`. Matches the Rust floor-index
+/// convention (Spike 3 parity). Gaps are absent rows — the caller zero-fills.
+fn bucket_sql(measures: &str) -> String {
+    format!(
+        "SELECT LEAST(CAST(floor((epoch(ts) - ?) / ?) AS INT), {last}) AS bucket, {measures}
+         FROM entries
+         WHERE epoch(ts) >= ? AND epoch(ts) < ?
+         GROUP BY bucket",
+        last = N_BUCKETS - 1, measures = measures,
+    )
 }
 
 /// Render a slice of paths as a DuckDB array literal: `'a/b.jsonl','c/d.jsonl'`.
@@ -691,29 +703,27 @@ impl UsageStore {
         result
     }
 
-    pub fn query_cost_timeline(&self, since_str: &str) -> Vec<(f64, f64)> {
-        if !self.initialized { return Vec::new(); }
-        let gen = self.generation;
-        {
-            let cache = self.cache.borrow();
-            if let Some((cg, val)) = cache.cost_timelines.get(since_str) {
-                if *cg == gen { return val.clone(); }
-            }
-        }
-        let key = since_str.to_string();
-        let result: Vec<(f64, f64)> = match self.con.prepare(
-            "SELECT epoch(ts)::DOUBLE, total_cost FROM entries WHERE ts >= ?::TIMESTAMP ORDER BY ts",
-        ) {
-            Ok(mut stmt) => match stmt.query_map([since_str], |row| {
-                Ok((row.get::<_, f64>(0)?, row.get::<_, f64>(1)?))
+    /// Cost timeline bucketed into `N_BUCKETS` equal time slices over [lo, hi)
+    /// (unix epoch seconds). Replaces the Rust `bucket_cost` loop — bucketing is
+    /// done in SQL (Spike 3 parity-verified). Returns exactly `N_BUCKETS` values,
+    /// gaps filled with 0. Uncached (Spike 5: ~6 ms).
+    pub fn query_cost_buckets(&self, lo: f64, hi: f64) -> Vec<f64> {
+        let binsize = (hi - lo) / N_BUCKETS as f64;
+        if !self.initialized || !(binsize > 0.0) { return vec![0.0; N_BUCKETS]; }
+        let mut out = vec![0.0f64; N_BUCKETS];
+        let sql = bucket_sql("SUM(total_cost)::DOUBLE");
+        match self.con.prepare(&sql) {
+            Ok(mut stmt) => match stmt.query_map([lo, binsize, lo, hi], |row| {
+                Ok((row.get::<_, i64>(0)? as usize, row.get::<_, f64>(1)?))
             }) {
-                Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
-                Err(e) => { warn!("Cost timeline: {}", e); Vec::new() }
+                Ok(rows) => for r in rows.flatten() {
+                    if r.0 < N_BUCKETS { out[r.0] = r.1; }
+                },
+                Err(e) => warn!("Cost buckets: {}", e),
             },
-            Err(e) => { warn!("Cost timeline prepare: {}", e); Vec::new() }
-        };
-        self.cache.borrow_mut().cost_timelines.insert(key, (gen, result.clone()));
-        result
+            Err(e) => warn!("Cost buckets prepare: {}", e),
+        }
+        out
     }
 
     #[allow(dead_code)] // ponytail: unused since build_all_stats switched to query_aggregates
@@ -752,37 +762,33 @@ impl UsageStore {
         result
     }
 
-    pub fn query_token_timeline(&self, since_str: &str) -> Vec<(f64, i64, i64, i64, i64)> {
-        if !self.initialized { return Vec::new(); }
-        let gen = self.generation;
-        {
-            let cache = self.cache.borrow();
-            if let Some((cg, val)) = cache.token_timelines.get(since_str) {
-                if *cg == gen { return val.clone(); }
-            }
-        }
-        let key = since_str.to_string();
-        let result = match self.con.prepare(
-            "SELECT epoch(ts)::DOUBLE, input_tokens, output_tokens,
-                    cache_creation_input_tokens, cache_read_input_tokens
-             FROM entries WHERE ts >= ?::TIMESTAMP ORDER BY ts",
-        ) {
-            Ok(mut stmt) => match stmt.query_map([since_str], |row| {
+    /// Token timeline bucketed into `N_BUCKETS` slices over [lo, hi) (unix epoch
+    /// seconds): (input, output, cache_creation, cache_read) per bucket. Replaces
+    /// the Rust `bucket_tokens` loop. Returns exactly `N_BUCKETS` tuples, gaps 0.
+    pub fn query_token_buckets(&self, lo: f64, hi: f64) -> Vec<(i64, i64, i64, i64)> {
+        let binsize = (hi - lo) / N_BUCKETS as f64;
+        if !self.initialized || !(binsize > 0.0) { return vec![(0, 0, 0, 0); N_BUCKETS]; }
+        let mut out = vec![(0i64, 0i64, 0i64, 0i64); N_BUCKETS];
+        let sql = bucket_sql(
+            "SUM(input_tokens)::BIGINT, SUM(output_tokens)::BIGINT, \
+             SUM(cache_creation_input_tokens)::BIGINT, SUM(cache_read_input_tokens)::BIGINT",
+        );
+        match self.con.prepare(&sql) {
+            Ok(mut stmt) => match stmt.query_map([lo, binsize, lo, hi], |row| {
                 Ok((
-                    row.get::<_, f64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(0)? as usize,
+                    row.get::<_, i64>(1)?, row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?, row.get::<_, i64>(4)?,
                 ))
             }) {
-                Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
-                Err(e) => { warn!("Token timeline: {}", e); Vec::new() }
+                Ok(rows) => for r in rows.flatten() {
+                    if r.0 < N_BUCKETS { out[r.0] = (r.1, r.2, r.3, r.4); }
+                },
+                Err(e) => warn!("Token buckets: {}", e),
             },
-            Err(e) => { warn!("Token timeline prepare: {}", e); Vec::new() }
-        };
-        self.cache.borrow_mut().token_timelines.insert(key, (gen, result.clone()));
-        result
+            Err(e) => warn!("Token buckets prepare: {}", e),
+        }
+        out
     }
 
     pub fn count_sessions(&self, since_str: &str, active_str: &str) -> (i64, i64) {
@@ -994,5 +1000,43 @@ mod tests {
         approx(gamma_total, 0.5);
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn bucket_sql_floor_index_and_bounds() {
+        let con = test_con();
+        let lo = 1_000_000.0_f64;
+        let hi = 1_004_800.0_f64; // binsize = 100, 48 buckets
+        let binsize = (hi - lo) / N_BUCKETS as f64;
+
+        // (epoch, cost, expected bucket or None if excluded)
+        let rows = [
+            (1_000_000.0, 1.0),  // offset 0     -> b0
+            (1_000_050.0, 2.0),  // offset 50    -> b0
+            (1_000_150.0, 4.0),  // offset 150   -> b1
+            (1_004_750.0, 8.0),  // offset 4750  -> floor(47.5)=47 -> b47
+            (1_004_800.0, 16.0), // offset == total -> excluded (epoch < hi false)
+            (999_999.0,   32.0), // epoch < lo -> excluded
+        ];
+        {
+            let mut ins = con.prepare(
+                "INSERT INTO entries (source, session_id, ts, file_path, total_cost)
+                 VALUES ('c', 's', to_timestamp(?) AT TIME ZONE 'UTC', 'f', ?)",
+            ).unwrap();
+            for (e, c) in rows { ins.execute(duckdb::params![e, c]).unwrap(); }
+        }
+
+        let mut out = vec![0.0f64; N_BUCKETS];
+        let sql = bucket_sql("SUM(total_cost)::DOUBLE");
+        let mut stmt = con.prepare(&sql).unwrap();
+        let mapped = stmt.query_map([lo, binsize, lo, hi], |r| {
+            Ok((r.get::<_, i64>(0)? as usize, r.get::<_, f64>(1)?))
+        }).unwrap();
+        for r in mapped.flatten() { out[r.0] = r.1; }
+
+        approx(out[0], 3.0);
+        approx(out[1], 4.0);
+        approx(out[47], 8.0);
+        approx(out.iter().sum::<f64>(), 15.0); // 16 + 32 excluded
     }
 }

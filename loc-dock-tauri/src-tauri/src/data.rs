@@ -200,19 +200,25 @@ fn build_all_stats(
     let time_labels_week = compute_time_labels(week_s, now, "week", day_start_hour);
     let time_labels_day = compute_time_labels(day_s, now, "day", day_start_hour);
 
+    // Epoch bounds for SQL timeline bucketing (matches bucket_git's tz-independent
+    // offset math: epoch(ts) - since_epoch over [since, now)).
+    let day_lo = day_s.timestamp() as f64;
+    let week_lo = week_s.timestamp() as f64;
+    let hi = now.timestamp() as f64;
+
     // Day stats (use daily_aggregates for fast totals, entries for timeline)
     let (day_cost_total, day_cost_breakdown, day_tokens, _day_sessions) = store.query_aggregates(day_utc_str);
     let day_source_breakdown = store.query_aggregate_source_breakdown(day_utc_str);
     let (day_sess_total, day_sess_active) = store.count_sessions(day_utc_str, active_str);
-    let day_cost_timeline = store.query_cost_timeline(day_utc_str);
-    let day_token_timeline = store.query_token_timeline(day_utc_str);
+    let day_cost_buckets = store.query_cost_buckets(day_lo, hi);
+    let day_token_buckets = store.query_token_buckets(day_lo, hi);
 
     // Week stats
     let (week_cost_total, week_cost_breakdown, week_tokens, _week_sessions) = store.query_aggregates(week_utc_str);
     let week_source_breakdown = store.query_aggregate_source_breakdown(week_utc_str);
     let (week_sess_total, week_sess_active) = store.count_sessions(week_utc_str, active_str);
-    let week_cost_timeline = store.query_cost_timeline(week_utc_str);
-    let week_token_timeline = store.query_token_timeline(week_utc_str);
+    let week_cost_buckets = store.query_cost_buckets(week_lo, hi);
+    let week_token_buckets = store.query_token_buckets(week_lo, hi);
 
     AllStats {
         ready: true,
@@ -234,10 +240,10 @@ fn build_all_stats(
         },
         // month/year left as Default (frontend renders 0s)
         git_buckets_day, git_buckets_week,
-        cost_buckets_day: bucket_cost(&day_cost_timeline, day_s, now),
-        cost_buckets_week: bucket_cost(&week_cost_timeline, week_s, now),
-        token_buckets_day: bucket_tokens(&day_token_timeline, day_s, now),
-        token_buckets_week: bucket_tokens(&week_token_timeline, week_s, now),
+        cost_buckets_day: day_cost_buckets,
+        cost_buckets_week: week_cost_buckets,
+        token_buckets_day: day_token_buckets,
+        token_buckets_week: week_token_buckets,
         time_labels_day, time_labels_week,
         ..Default::default()
     }
@@ -256,51 +262,6 @@ fn bucket_git(points: &[GitPoint], since: &DateTime<Tz>, until: &DateTime<Tz>) -
         let idx = idx.min(N_BUCKETS - 1);
         buckets[idx].0 += p.added;
         buckets[idx].1 += p.deleted;
-    }
-    buckets
-}
-
-fn bucket_cost(
-    points: &[(f64, f64)],
-    since: &DateTime<Tz>,
-    until: &DateTime<Tz>,
-) -> Vec<f64> {
-    let since_epoch = since.timestamp() as f64;
-    let until_epoch = until.timestamp() as f64;
-    let total_secs = (until_epoch - since_epoch).max(1.0);
-    let mut buckets = vec![0.0f64; N_BUCKETS];
-    for &(epoch, cost) in points {
-        let offset = epoch - since_epoch;
-        if offset < 0.0 || offset >= total_secs {
-            continue;
-        }
-        let idx = ((offset / total_secs) * N_BUCKETS as f64) as usize;
-        let idx = idx.min(N_BUCKETS - 1);
-        buckets[idx] += cost;
-    }
-    buckets
-}
-
-fn bucket_tokens(
-    points: &[(f64, i64, i64, i64, i64)],
-    since: &DateTime<Tz>,
-    until: &DateTime<Tz>,
-) -> Vec<(i64, i64, i64, i64)> {
-    let since_epoch = since.timestamp() as f64;
-    let until_epoch = until.timestamp() as f64;
-    let total_secs = (until_epoch - since_epoch).max(1.0);
-    let mut buckets = vec![(0i64, 0i64, 0i64, 0i64); N_BUCKETS];
-    for &(epoch, inp, out, cw, cr) in points {
-        let offset = epoch - since_epoch;
-        if offset < 0.0 || offset >= total_secs {
-            continue;
-        }
-        let idx = ((offset / total_secs) * N_BUCKETS as f64) as usize;
-        let idx = idx.min(N_BUCKETS - 1);
-        buckets[idx].0 += inp;
-        buckets[idx].1 += out;
-        buckets[idx].2 += cw;
-        buckets[idx].3 += cr;
     }
     buckets
 }

@@ -25,7 +25,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: windows-latest
+          # Pinned: windows-latest moved to VS 2026 (MSVC 14.51.36231), whose
+          # STL removed stdext::checked_array_iterator — the bundled DuckDB fmt
+          # uses it under an always-true `#ifdef _SECURE_SCL`. VS 2022
+          # (windows-2022) still ships stdext, so the amalgamation compiles.
+          # See ISSUES.md #7.
+          - platform: windows-2022
           - platform: macos-latest
           - platform: ubuntu-24.04
 

@@ -65,6 +65,23 @@ pub fn run() {
         })
         .setup(move |app| {
             let handle = app.handle().clone();
+
+            // Show the dock window immediately, decoupled from the frontend and from
+            // any data loading. Position it bottom-right first so it doesn't flash at
+            // the default spot. The webview paints an instant boot spinner (index.html)
+            // while React + backend data load behind it.
+            if let Some(win) = app.get_webview_window("main") {
+                if let Ok(Some(monitor)) = win.current_monitor() {
+                    let (msize, mpos) = (monitor.size(), monitor.position());
+                    if let Ok(wsize) = win.outer_size() {
+                        let x = mpos.x + (msize.width as i32 - wsize.width as i32);
+                        let y = mpos.y + (msize.height as i32 - wsize.height as i32);
+                        let _ = win.set_position(tauri::PhysicalPosition { x, y });
+                    }
+                }
+                let _ = win.show();
+            }
+
             if let Err(e) = tray::setup_tray(&handle) {
                 log::warn!("Failed to setup tray: {}", e);
             }

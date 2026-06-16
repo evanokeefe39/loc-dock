@@ -10,31 +10,43 @@ use crate::usage_store::UsageStore;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, Window};
 
+// All commands are `async` so Tauri runs them on the async runtime's thread pool —
+// like request handlers in a web server — never on the main/UI thread. This keeps
+// the dock responsive no matter how slow a handler is. The frontend already treats
+// every command as an async API call (invoke -> Promise) and receives server-push
+// updates via emitted events (stats-update, summary-update, tasks-changed).
+
 #[tauri::command]
-pub fn get_theme(app: AppHandle) -> Theme {
+pub async fn get_theme(app: AppHandle) -> Theme {
     app.state::<Theme>().inner().clone()
 }
 
 #[tauri::command]
-pub fn get_stats(app: AppHandle) -> AllStats {
+pub async fn get_stats(app: AppHandle) -> AllStats {
     let stats = app.state::<SharedStats>();
-    stats.read().map(|s| s.clone()).unwrap_or_default()
+    let v = stats.read().map(|s| s.clone()).unwrap_or_default();
+    v
 }
 
 #[tauri::command]
-pub fn get_summary(app: AppHandle) -> SummaryData {
-    let config = app.state::<Arc<Config>>();
-    summary::get_current_summary(&config)
+pub async fn get_summary(app: AppHandle) -> SummaryData {
+    // Read the latest computed summary from shared state — never re-scans git, so
+    // it can't block (the summary loop owns all git/LLM work).
+    let v = app.state::<summary::SharedSummary>()
+        .read()
+        .map(|s| s.clone())
+        .unwrap_or_default();
+    v
 }
 
 #[tauri::command]
-pub fn get_settings() -> Settings {
+pub async fn get_settings() -> Settings {
     let config = Config::load();
     config.settings
 }
 
 #[tauri::command]
-pub fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
+pub async fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
     let config = app.state::<Arc<Config>>();
     settings.save(&config.config_dir)?;
 
@@ -58,42 +70,42 @@ pub fn restart_app(app: AppHandle) {
 }
 
 #[tauri::command]
-pub fn get_active_tasks(app: AppHandle) -> Vec<ActiveTask> {
+pub async fn get_active_tasks(app: AppHandle) -> Vec<ActiveTask> {
     app.state::<TaskQueue>().active_tasks()
 }
 
 #[tauri::command]
-pub fn reset_git_cache(app: AppHandle) -> Result<(), String> {
-    let config = app.state::<Arc<Config>>();
-    GitCache::reset(&config.settings.git_cache_dir)?;
+pub async fn reset_git_cache(app: AppHandle) -> Result<(), String> {
+    let dir = app.state::<Arc<Config>>().settings.git_cache_dir.clone();
+    GitCache::reset(&dir)?;
     job_log::log_ok("git_cache", "Git cache reset");
     Ok(())
 }
 
 #[tauri::command]
-pub fn reset_usage_cache(app: AppHandle) -> Result<(), String> {
-    let config = app.state::<Arc<Config>>();
-    UsageStore::reset(&config.settings.usage_cache_dir)?;
+pub async fn reset_usage_cache(app: AppHandle) -> Result<(), String> {
+    let dir = app.state::<Arc<Config>>().settings.usage_cache_dir.clone();
+    UsageStore::reset(&dir)?;
     job_log::log_ok("usage_cache", "Usage cache reset");
     Ok(())
 }
 
 #[tauri::command]
-pub fn reset_summary_cache(app: AppHandle) -> Result<(), String> {
-    let config = app.state::<Arc<Config>>();
+pub async fn reset_summary_cache(app: AppHandle) -> Result<(), String> {
+    let config = app.state::<Arc<Config>>().inner().clone();
     summary::reset_summaries(&config)
 }
 
 #[tauri::command]
-pub fn get_job_logs(app: AppHandle) -> Vec<LogEntry> {
-    let config = app.state::<Arc<Config>>();
-    job_log::read_logs(&config.settings.log_dir, 100)
+pub async fn get_job_logs(app: AppHandle) -> Vec<LogEntry> {
+    let dir = app.state::<Arc<Config>>().settings.log_dir.clone();
+    job_log::read_logs(&dir, 100)
 }
 
 #[tauri::command]
-pub fn clear_job_logs(app: AppHandle) -> Result<(), String> {
-    let config = app.state::<Arc<Config>>();
-    job_log::clear_logs(&config.settings.log_dir)
+pub async fn clear_job_logs(app: AppHandle) -> Result<(), String> {
+    let dir = app.state::<Arc<Config>>().settings.log_dir.clone();
+    job_log::clear_logs(&dir)
 }
 
 #[tauri::command]

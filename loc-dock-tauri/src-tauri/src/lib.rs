@@ -30,6 +30,7 @@ pub fn run() {
     let config = Arc::new(Config::load());
     let theme = Theme::load(&config.settings.theme_path);
     let stats: SharedStats = Arc::new(RwLock::new(AllStats::default()));
+    let summary_state: summary::SharedSummary = Arc::new(RwLock::new(summary::SummaryData::default()));
     let autostart_enabled = config.settings.autostart;
 
     tauri::Builder::default()
@@ -40,6 +41,7 @@ pub fn run() {
         ))
         .manage(theme)
         .manage(stats.clone())
+        .manage(summary_state.clone())
         .manage(config.clone())
         .manage(TaskQueue::new())
         .invoke_handler(tauri::generate_handler![
@@ -99,7 +101,7 @@ pub fn run() {
 
             job_log::init(&config.settings.log_dir);
             data::spawn_data_loop(handle.clone(), config.clone(), stats.clone());
-            summary::spawn_summary_loop(handle, config.clone());
+            summary::spawn_summary_loop(handle, config.clone(), summary_state.clone());
             Ok(())
         })
         .run(tauri::generate_context!())

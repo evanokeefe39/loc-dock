@@ -12,11 +12,12 @@ const DAY_SECS: f64 = 86400.0;
 const N_BUCKETS: usize = 48;
 const DB_NAME: &str = "usage_cache.db";
 const MARKER: &str = "usage_cache.db.reset";
-const SCHEMA_VERSION: &str = "6";  // V2: SQL silver ingest, no Rust parsers / file_tracker
+const SCHEMA_VERSION: &str = "7";  // V2: SQL ingest; bumped to recover from poisoned registry
 
 /// Files ingested per silver INSERT. Caps transient JSON-parse memory on cold
-/// rebuilds (Spike 4b: 16 files + 512 MB guard rail peaks ~150 MB).
-const INGEST_BATCH_FILES: usize = 16;
+/// rebuilds; smaller batches + bounded threads keep the non-spillable parse peak
+/// well under the memory_limit ceiling.
+const INGEST_BATCH_FILES: usize = 8;
 const MAX_OBJECT_SIZE: u64 = 64 * 1024 * 1024;  // 64 MB; default 16 MB too small (edge case)
 
 // ponytail: kept for future use; per-source ETL in data loop doesn't need this
@@ -59,12 +60,14 @@ impl UsageStore {
 
         let con = Connection::open(&db_path).expect("failed to open usage_cache.db");
 
-        // Guard rails for the SQL JSON-ingest path (Spike 4b): the read_ndjson
-        // parse path holds non-spillable buffers, so a tight memory_limit acts as
-        // a high ceiling, not a spill trigger. 512 MB + micro-batching keeps cold
-        // rebuilds bounded; preserve_insertion_order=false lowers peak further.
+        // Guard rails for the SQL JSON-ingest path. The read_ndjson parse path holds
+        // non-spillable buffers PER THREAD, so on a many-core box the bundled engine
+        // fans a batch across all cores and a tight memory_limit OOMs (it can't spill).
+        // Bound the fan-out (threads) to cap concurrent parse buffers, keep a generous
+        // ceiling well above the real ~300 MB cold-start peak (Spike 4), and disable
+        // insertion-order preservation. Micro-batching bounds per-statement rows.
         let _ = con.execute_batch(
-            "SET memory_limit='512MB'; SET preserve_insertion_order=false;",
+            "SET threads=2; SET memory_limit='2GB'; SET preserve_insertion_order=false;",
         );
 
         // Ensure meta table exists (check schema version)
@@ -85,7 +88,8 @@ impl UsageStore {
                 "DROP TABLE IF EXISTS entries; \
                  DROP TABLE IF EXISTS watermarks; \
                  DROP TABLE IF EXISTS file_tracker; \
-                 DROP TABLE IF EXISTS ingested_files;"
+                 DROP TABLE IF EXISTS ingested_files; \
+                 DROP TABLE IF EXISTS daily_aggregates;"
             );
             info!("Schema version {} → {}: reset tables", stored_ver, SCHEMA_VERSION);
         }
@@ -282,9 +286,9 @@ fn process_source(
         return Ok(0);
     }
 
-    // Registry filter: keep only files new or changed since last ingest.
-    let mut changed: Vec<PathBuf> = Vec::new();
-    let mut stamps: Vec<(String, f64, i64)> = Vec::new();
+    // Registry filter: keep only files new or changed since last ingest, carrying
+    // each file's (path, stat) together so stamping can follow ingest success.
+    let mut changed: Vec<(PathBuf, String, f64, i64)> = Vec::new();
     for path in &all_files {
         let meta = match path.metadata() { Ok(m) => m, Err(_) => continue };
         let mtime = meta
@@ -298,8 +302,7 @@ fn process_source(
         if file_unchanged(con, &key, mtime, size) {
             continue;
         }
-        changed.push(path.clone());
-        stamps.push((key, mtime, size));
+        changed.push((path.clone(), key, mtime, size));
     }
 
     let skipped = all_files.len() - changed.len();
@@ -317,23 +320,34 @@ fn process_source(
     };
 
     let mut total = 0usize;
+    let mut failed = 0usize;
     for chunk in changed.chunks(batch_files) {
-        total += ingest_files(con, kind, chunk)?;
-    }
-
-    // Record stat stamps only after successful ingest; a failed cycle re-tries
-    // next time (INSERT OR IGNORE keeps that idempotent).
-    for (key, mtime, size) in &stamps {
-        if let Err(e) = con.execute(
-            "INSERT OR REPLACE INTO ingested_files (file_path, mtime, size) VALUES (?, ?, ?)",
-            duckdb::params![key, mtime, size],
-        ) {
-            warn!("ETL '{}': registry update {}: {}", kind.name(), key, e);
+        let paths: Vec<PathBuf> = chunk.iter().map(|(p, ..)| p.clone()).collect();
+        match ingest_files(con, kind, &paths) {
+            Ok(n) => {
+                total += n;
+                // Stamp only this batch's files now that its ingest committed; a
+                // failed batch is left unstamped so it retries next cycle (INSERT OR
+                // IGNORE keeps the retry idempotent).
+                for (_, key, mtime, size) in chunk {
+                    if let Err(e) = con.execute(
+                        "INSERT OR REPLACE INTO ingested_files (file_path, mtime, size) VALUES (?, ?, ?)",
+                        duckdb::params![key, mtime, size],
+                    ) {
+                        warn!("ETL '{}': registry update {}: {}", kind.name(), key, e);
+                    }
+                }
+            }
+            Err(e) => {
+                failed += chunk.len();
+                warn!("ETL '{}': batch of {} files failed (will retry): {}",
+                    kind.name(), chunk.len(), e);
+            }
         }
     }
 
-    info!("ETL '{}': {} entries from {} changed files ({} unchanged)",
-        kind.name(), total, changed.len(), skipped);
+    info!("ETL '{}': {} entries from {} changed files ({} unchanged, {} failed)",
+        kind.name(), total, changed.len() - failed, skipped, failed);
     Ok(total)
 }
 
@@ -370,10 +384,9 @@ fn ingest_files(con: &Connection, kind: SourceKind, paths: &[PathBuf]) -> Result
         let _ = con.execute_batch("SET preserve_insertion_order=false;");
     }
 
-    match result {
-        Ok(n) => Ok(n),
-        Err(e) => { warn!("ETL '{}': ingest insert: {}", kind.name(), e); Ok(0) }
-    }
+    // Propagate the error so the caller does NOT stamp these files as ingested —
+    // a swallowed error would poison the registry (files marked done, 0 rows in).
+    result.map_err(|e| format!("ingest insert: {}", e))
 }
 
 /// Build a timeline-bucketing query: assign each `entries` row in [lo, hi) to one

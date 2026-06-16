@@ -21,7 +21,11 @@ tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-duckdb = { version = "1", features = ["bundled"] }
+# Pinned exact: the bundled feature compiles DuckDB's vendored C++ from source,
+# so a version bump changes that source (toolchain-compat risk) and busts every
+# build cache. Pin so the build stays deterministic and cacheable; bump
+# deliberately. See ISSUES.md #7.
+duckdb = { version = "=1.10503.1", features = ["bundled"] }
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 tokio = { version = "1", features = ["time", "sync"] }

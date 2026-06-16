@@ -1,0 +1,6 @@
+# Pin the Rust toolchain so the build is reproducible and won't break when a
+# future stable release changes lints/behavior under us. Bump deliberately.
+# Old toolchains remain downloadable indefinitely, so this stays buildable
+# even after long periods untouched. See ISSUES.md #7.
+[toolchain]
+channel = "1.92.0"

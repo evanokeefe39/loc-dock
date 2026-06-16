@@ -50,10 +50,9 @@ lto = true
 codegen-units = 1
 opt-level = "s"
 
-# The bundled DuckDB C++ amalgamation is huge. With dev-profile debug info
-# (`-Z7`), each parallel `cl.exe` peaks at multiple GB and the GitHub
-# windows-latest runner (16 GB) OOM-kills them mid-build. We never debug into
-# DuckDB's vendored C++, so drop its debug info: far lower peak memory (fixes
-# CI OOM) and faster local debug builds. Our own Rust crates keep full debug.
+# The bundled DuckDB C++ amalgamation is large; we never debug into its
+# vendored sources. Dropping dev-profile debug info (`-Z7`) for it noticeably
+# cuts compile time and peak memory locally and in CI. Our own Rust crates
+# keep full debug info.
 [profile.dev.package.libduckdb-sys]
 debug = false

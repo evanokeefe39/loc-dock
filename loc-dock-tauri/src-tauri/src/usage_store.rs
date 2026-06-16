@@ -84,7 +84,8 @@ impl UsageStore {
             let _ = con.execute_batch(
                 "DROP TABLE IF EXISTS entries; \
                  DROP TABLE IF EXISTS watermarks; \
-                 DROP TABLE IF EXISTS file_tracker;"
+                 DROP TABLE IF EXISTS file_tracker; \
+                 DROP TABLE IF EXISTS ingested_files;"
             );
             info!("Schema version {} → {}: reset tables", stored_ver, SCHEMA_VERSION);
         }
@@ -133,6 +134,18 @@ impl UsageStore {
                  loc_added        BIGINT NOT NULL DEFAULT 0,
                  loc_deleted      BIGINT NOT NULL DEFAULT 0,
                  UNIQUE(date, source)
+             );
+"
+        );
+
+        // v6: ingested_files — stat registry for incremental ingest (Spike 4).
+        // A file is re-ingested only when its (mtime, size) changes; changed files
+        // are re-read whole (no byte seek), with INSERT OR IGNORE deduping prior rows.
+        let _ = con.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ingested_files (
+                 file_path  TEXT PRIMARY KEY,
+                 mtime      DOUBLE NOT NULL,
+                 size       BIGINT NOT NULL
              );
 "
         );
@@ -245,13 +258,15 @@ impl UsageStore {
     }
 }
 
-/// Process one source: discover files within the retention window, then ingest
-/// them into the silver `entries` table via DuckDB SQL (bronze `read_ndjson_objects`
-/// + per-source extraction). No Rust JSON parsing, no byte seek/tail tracking.
+/// Process one source: discover files within the retention window, ingest only
+/// those whose (mtime, size) changed since last cycle (the `ingested_files`
+/// registry), via DuckDB SQL (bronze `read_ndjson_objects` + per-source extraction).
+/// No Rust JSON parsing, no byte seek/tail tracking — changed files are re-read
+/// whole and INSERT OR IGNORE dedupes prior rows.
 ///
-/// Files are micro-batched (Spike 4b) to cap the non-spillable JSON-parse memory
-/// on cold rebuilds. Discovery stays in Rust so the read is bounded to the 7-day
-/// window — globbing in DuckDB would read full history (Spike 4 memory regression).
+/// Files are micro-batched (Spike 4b) to cap the non-spillable JSON-parse memory on
+/// cold rebuilds. Discovery stays in Rust so the read is bounded to the 7-day window
+/// — globbing in DuckDB would read full history (Spike 4 memory regression).
 fn process_source(
     con: &Connection,
     discoverer: &dyn FileDiscoverer,
@@ -267,9 +282,31 @@ fn process_source(
         return Ok(0);
     }
 
-    info!("ETL '{}': {} files in window (cutoff={:.0}h ago)", kind.name(), all_files.len(),
-        (SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs_f64() - cutoff) / 3600.0
-    );
+    // Registry filter: keep only files new or changed since last ingest.
+    let mut changed: Vec<PathBuf> = Vec::new();
+    let mut stamps: Vec<(String, f64, i64)> = Vec::new();
+    for path in &all_files {
+        let meta = match path.metadata() { Ok(m) => m, Err(_) => continue };
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        let size = meta.len() as i64;
+        let key = path.to_string_lossy().replace('\\', "/");
+        if file_unchanged(con, &key, mtime, size) {
+            continue;
+        }
+        changed.push(path.clone());
+        stamps.push((key, mtime, size));
+    }
+
+    let skipped = all_files.len() - changed.len();
+    if changed.is_empty() {
+        info!("ETL '{}': 0 changed files ({} unchanged)", kind.name(), skipped);
+        return Ok(0);
+    }
 
     // Pi carry-forward (model_change → assistant rows) needs intra-file row order,
     // so Pi ingests one file per statement under preserve_insertion_order=true.
@@ -280,12 +317,36 @@ fn process_source(
     };
 
     let mut total = 0usize;
-    for chunk in all_files.chunks(batch_files) {
+    for chunk in changed.chunks(batch_files) {
         total += ingest_files(con, kind, chunk)?;
     }
 
-    info!("ETL '{}': {} entries from {} files", kind.name(), total, all_files.len());
+    // Record stat stamps only after successful ingest; a failed cycle re-tries
+    // next time (INSERT OR IGNORE keeps that idempotent).
+    for (key, mtime, size) in &stamps {
+        if let Err(e) = con.execute(
+            "INSERT OR REPLACE INTO ingested_files (file_path, mtime, size) VALUES (?, ?, ?)",
+            duckdb::params![key, mtime, size],
+        ) {
+            warn!("ETL '{}': registry update {}: {}", kind.name(), key, e);
+        }
+    }
+
+    info!("ETL '{}': {} entries from {} changed files ({} unchanged)",
+        kind.name(), total, changed.len(), skipped);
     Ok(total)
+}
+
+/// True when the registry already has this file at the same (mtime, size).
+fn file_unchanged(con: &Connection, key: &str, mtime: f64, size: i64) -> bool {
+    con.prepare("SELECT mtime, size FROM ingested_files WHERE file_path = ?")
+        .ok()
+        .and_then(|mut stmt| {
+            stmt.query_row([key], |row| Ok((row.get::<_, f64>(0)?, row.get::<_, i64>(1)?)))
+                .ok()
+        })
+        .map(|(m, s)| m == mtime && s == size)
+        .unwrap_or(false)
 }
 
 /// Build the bronze→silver SQL for a batch of files and execute it.
@@ -715,6 +776,7 @@ impl UsageStore {
 mod tests {
     use super::*;
     use crate::pricing::{CACHE_READ_PRICE, CACHE_WRITE_PRICE, INPUT_PRICE, OUTPUT_PRICE};
+    use crate::source_adapter::GlobFileDiscoverer;
 
     const ENTRIES_DDL: &str = "CREATE TABLE entries (
         source TEXT NOT NULL, session_id TEXT NOT NULL, ts TIMESTAMP NOT NULL,
@@ -728,9 +790,14 @@ mod tests {
         UNIQUE(source, session_id, ts, file_path)
     );";
 
+    const REGISTRY_DDL: &str = "CREATE TABLE ingested_files (
+        file_path TEXT PRIMARY KEY, mtime DOUBLE NOT NULL, size BIGINT NOT NULL
+    );";
+
     fn test_con() -> Connection {
         let con = Connection::open_in_memory().unwrap();
         con.execute_batch(ENTRIES_DDL).unwrap();
+        con.execute_batch(REGISTRY_DDL).unwrap();
         con
     }
 
@@ -882,5 +949,40 @@ mod tests {
         approx(out[1], 4.0);
         approx(out[47], 8.0);
         approx(out.iter().sum::<f64>(), 15.0); // 16 + 32 excluded
+    }
+
+    #[test]
+    fn registry_skips_unchanged_and_reingests_on_change() {
+        let con = test_con();
+        let dir = std::env::temp_dir().join(format!(
+            "locdock_reg_{}_{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("claude.jsonl");
+        let row1 = "{\"type\":\"assistant\",\"sessionId\":\"s1\",\"timestamp\":\"2024-01-02T03:04:05Z\",\"message\":{\"model\":\"m\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n";
+        std::fs::write(&file, row1).unwrap();
+
+        let disc = GlobFileDiscoverer::new(dir.clone(), vec![]);
+
+        // First cycle ingests the one row.
+        let n1 = process_source(&con, &disc, SourceKind::Claude, 0.0).unwrap();
+        assert_eq!(n1, 1);
+
+        // Second cycle: file unchanged → skipped, nothing ingested.
+        let n2 = process_source(&con, &disc, SourceKind::Claude, 0.0).unwrap();
+        assert_eq!(n2, 0);
+
+        // Append a second row → mtime+size change → whole-file re-read; old row
+        // deduped by INSERT OR IGNORE, only the new row counts.
+        let row2 = "{\"type\":\"assistant\",\"sessionId\":\"s1\",\"timestamp\":\"2024-01-02T03:05:05Z\",\"message\":{\"model\":\"m\",\"usage\":{\"input_tokens\":2,\"output_tokens\":2}}}\n";
+        std::fs::write(&file, format!("{row1}{row2}")).unwrap();
+
+        let n3 = process_source(&con, &disc, SourceKind::Claude, 0.0).unwrap();
+        assert_eq!(n3, 1, "only the newly appended row inserts");
+
+        let count: i64 = con.query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

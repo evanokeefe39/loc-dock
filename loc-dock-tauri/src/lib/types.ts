@@ -2,14 +2,24 @@ export interface AllStats {
   ready: boolean;
   day: RangeStats;
   week: RangeStats;
+  month: RangeStats;
+  year: RangeStats;
   git_buckets_day: [number, number][];
   git_buckets_week: [number, number][];
+  git_buckets_month: [number, number][];
+  git_buckets_year: [number, number][];
   cost_buckets_day: number[];
   cost_buckets_week: number[];
+  cost_buckets_month: number[];
+  cost_buckets_year: number[];
   token_buckets_day: [number, number, number, number][];
   token_buckets_week: [number, number, number, number][];
+  token_buckets_month: [number, number, number, number][];
+  token_buckets_year: [number, number, number, number][];
   time_labels_day: TimeLabels;
   time_labels_week: TimeLabels;
+  time_labels_month: TimeLabels;
+  time_labels_year: TimeLabels;
 }
 
 export interface RangeStats {
@@ -20,6 +30,15 @@ export interface RangeStats {
   tokens: TokenTotals;
   sessions_total: number;
   sessions_active: number;
+  source_breakdown: SourceStats[];
+}
+
+export interface SourceStats {
+  source: string;
+  sessions_total: number;
+  sessions_active: number;
+  tokens: TokenTotals;
+  cost_total: number;
 }
 
 export interface CostBreakdown {
@@ -65,7 +84,7 @@ export interface Theme {
   tok_cache_read: string;
 }
 
-export type TimeRange = "day" | "week";
+export type TimeRange = "day" | "week" | "month" | "year";
 export type ChartMode = "loc" | "cost" | "tokens";
 
 export interface RepoSummary {

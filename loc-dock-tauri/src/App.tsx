@@ -55,6 +55,7 @@ function App() {
 
   const currentStats = stats ? stats[range] : null;
   const MODES: ChartMode[] = ["loc", "cost", "tokens"];
+  const RANGES: TimeRange[] = ["day", "week", "month", "year"];
 
   const handleClose = () => getCurrentWindow().hide();
 
@@ -64,7 +65,7 @@ function App() {
         stats={currentStats}
         range={range}
         mode={mode}
-        onToggleRange={() => setRange(r => r === "day" ? "week" : "day")}
+        onToggleRange={() => setRange(r => RANGES[(RANGES.indexOf(r) + 1) % RANGES.length])}
         onToggleMode={() => setMode(m => MODES[(MODES.indexOf(m) + 1) % MODES.length])}
         onSettings={() => setSettingsOpen(true)}
         onClose={handleClose}

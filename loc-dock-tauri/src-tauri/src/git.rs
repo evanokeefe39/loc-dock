@@ -1,8 +1,9 @@
 use crate::git_cache::GitCache;
 use chrono::{DateTime, FixedOffset};
 use log::{info, warn};
+use rayon::prelude::*;
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
@@ -99,6 +100,11 @@ fn run_git_log(path: &Path, since: &str) -> Vec<GitPoint> {
 
 /// Scan git repos under `repos_dir`, using `cache` for incremental updates.
 /// Returns all points since `since_iso`, sorted ascending by timestamp.
+///
+/// Incremental strategy (PERF-001):
+/// - Repos whose HEAD SHA matches the cache are **skipped entirely**
+/// - Repos with a changed SHA only scan commits newer than `latest_ts`
+/// - Git log calls run in parallel via rayon
 pub fn get_git_loc_timeline(repos_dir: &Path, since_iso: &str, cache: &GitCache) -> Vec<GitPoint> {
     if !check_git() || !repos_dir.exists() {
         return cache.query_since(since_iso);
@@ -110,6 +116,16 @@ pub fn get_git_loc_timeline(repos_dir: &Path, since_iso: &str, cache: &GitCache)
     };
 
     let mut disk_repos = HashSet::new();
+
+    // Phase 1 (sequential): discover repos, check SHAs, collect work items
+    struct RepoWork {
+        name: String,
+        path: PathBuf,
+        current_sha: String,
+        effective_since: String,
+    }
+
+    let mut repo_work: Vec<RepoWork> = Vec::new();
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -130,24 +146,42 @@ pub fn get_git_loc_timeline(repos_dir: &Path, since_iso: &str, cache: &GitCache)
         let cached_sha = cache.get_head_sha(&repo_name);
         let sha_matches = cached_sha.as_deref() == Some(&current_sha);
 
-        if !sha_matches {
-            if cached_sha.is_some() {
-                info!("Git cache: SHA mismatch for {}, purging", repo_name);
-            }
-            cache.purge_repo(&repo_name);
-            let new_points = run_git_log(&path, since_iso);
-            cache.insert_points(&repo_name, &new_points);
-            cache.set_head_sha(&repo_name, &current_sha);
-        } else {
-            let effective_since = cache.latest_ts(&repo_name).unwrap_or_else(|| since_iso.to_string());
-            let new_points = run_git_log(&path, &effective_since);
-            if !new_points.is_empty() {
-                cache.insert_points(&repo_name, &new_points);
-                cache.set_head_sha(&repo_name, &current_sha);
-            }
+        if sha_matches {
+            // No new commits since last scan — skip entirely
+            continue;
         }
+
+        if cached_sha.is_some() {
+            info!("Git cache: SHA mismatch for {}, scanning new commits", repo_name);
+        }
+
+        let effective_since = cache.latest_ts(&repo_name).unwrap_or_else(|| since_iso.to_string());
+
+        repo_work.push(RepoWork {
+            name: repo_name,
+            path,
+            current_sha,
+            effective_since,
+        });
     }
 
+    // Phase 2 (parallel): run git log calls concurrently via rayon
+    let results: Vec<(String, Vec<GitPoint>, String)> = repo_work
+        .into_par_iter()
+        .map(|work| {
+            let new_points = run_git_log(&work.path, &work.effective_since);
+            (work.name, new_points, work.current_sha)
+        })
+        .collect();
+
+    // Phase 3 (sequential): insert results into cache
+    for (repo_name, new_points, current_sha) in &results {
+        cache.purge_repo(repo_name);
+        cache.insert_points(repo_name, new_points);
+        cache.set_head_sha(repo_name, current_sha);
+    }
+
+    // Prune repos removed from disk
     for stale in cache.cached_repos().difference(&disk_repos) {
         info!("Git cache: repo {} removed from disk, purging", stale);
         cache.purge_repo(stale);

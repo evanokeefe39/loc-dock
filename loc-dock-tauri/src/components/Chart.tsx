@@ -59,16 +59,29 @@ export function Chart({ stats, mode, range, theme }: Props) {
       return;
     }
 
-    const labels = rangeRef.current === "day" ? s.time_labels_day : s.time_labels_week;
+    const r = rangeRef.current;
+    const labels = r === "day" ? s.time_labels_day
+      : r === "week" ? s.time_labels_week
+      : r === "month" ? s.time_labels_month
+      : s.time_labels_year;
 
     if (modeRef.current === "loc") {
-      const buckets = rangeRef.current === "day" ? s.git_buckets_day : s.git_buckets_week;
+      const buckets = r === "day" ? s.git_buckets_day
+        : r === "week" ? s.git_buckets_week
+        : r === "month" ? s.git_buckets_month
+        : s.git_buckets_year;
       drawLocChart(ctx, w, h, buckets, labels, themeRef.current);
     } else if (modeRef.current === "cost") {
-      const buckets = rangeRef.current === "day" ? s.cost_buckets_day : s.cost_buckets_week;
+      const buckets = r === "day" ? s.cost_buckets_day
+        : r === "week" ? s.cost_buckets_week
+        : r === "month" ? s.cost_buckets_month
+        : s.cost_buckets_year;
       drawCostChart(ctx, w, h, buckets, labels, themeRef.current);
     } else {
-      const buckets = rangeRef.current === "day" ? s.token_buckets_day : s.token_buckets_week;
+      const buckets = r === "day" ? s.token_buckets_day
+        : r === "week" ? s.token_buckets_week
+        : r === "month" ? s.token_buckets_month
+        : s.token_buckets_year;
       drawTokenChart(ctx, w, h, buckets, labels, themeRef.current);
     }
   }, []);

@@ -266,6 +266,27 @@ html, body {
   gap: 2px;
 }
 
+.source-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  margin-left: 4px;
+}
+
+.source-badge-label {
+  font-size: 9px;
+  font-weight: bold;
+  background: rgba(255,255,255,0.08);
+  border-radius: 2px;
+  padding: 0 3px;
+  line-height: 1.3;
+}
+
+.source-badge-count {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
 @container dock (max-width: 430px) {
   .hide-narrow { display: none; }
 }

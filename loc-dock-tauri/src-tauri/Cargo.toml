@@ -2,6 +2,7 @@
 name = "loc-dock"
 version = "0.2.0"
 description = "Floating desktop widget that tracks your daily dev metrics at a glance"
+default-run = "loc-dock"
 authors = ["Evan O'Keefe"]
 license = "MIT"
 repository = "https://github.com/evanokeefe39/loc-dock"
@@ -30,9 +31,15 @@ log = "0.4"
 env_logger = "0.11"
 dirs = "6"
 regex = "1"
+rayon = "1"
 iana-time-zone = "0.1"
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
 tauri-plugin-autostart = "2"
+
+[[bin]]
+name = "loc-dock"
+path = "src/main.rs"
+
 
 [dev-dependencies]
 tempfile = "3"

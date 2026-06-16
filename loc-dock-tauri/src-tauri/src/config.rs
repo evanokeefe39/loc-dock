@@ -7,6 +7,8 @@ pub struct Settings {
     pub repos_dir: PathBuf,
     #[serde(default = "default_claude_dir")]
     pub claude_dir: PathBuf,
+    #[serde(default = "default_pi_dir")]
+    pub pi_dir: PathBuf,
     #[serde(default = "default_timezone")]
     pub timezone: String,
     #[serde(default = "default_day_start_hour")]
@@ -49,6 +51,7 @@ pub struct Config {
     pub settings: Settings,
     pub config_dir: PathBuf,
     pub projects_dir: PathBuf,
+    pub pi_sessions_dir: PathBuf,
 }
 
 impl Config {
@@ -56,7 +59,8 @@ impl Config {
         let config_dir = Self::config_dir();
         let settings = Settings::load(&config_dir);
         let projects_dir = settings.claude_dir.join("projects");
-        Config { settings, config_dir, projects_dir }
+        let pi_sessions_dir = settings.pi_dir.join("agent").join("sessions");
+        Config { settings, config_dir, projects_dir, pi_sessions_dir }
     }
 
     pub fn config_dir() -> PathBuf {
@@ -101,6 +105,9 @@ impl Settings {
             claude_dir: std::env::var("LOCDOCK_CLAUDE_DIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| home.join(".claude")),
+            pi_dir: std::env::var("LOCDOCK_PI_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| home.join(".pi")),
             timezone: std::env::var("LOCDOCK_TIMEZONE")
                 .unwrap_or_else(|_| default_timezone()),
             day_start_hour: std::env::var("LOCDOCK_DAY_START_HOUR")
@@ -155,6 +162,7 @@ impl Default for Settings {
         Settings {
             repos_dir: home.join("repos"),
             claude_dir: home.join(".claude"),
+            pi_dir: home.join(".pi"),
             timezone: default_timezone(),
             day_start_hour: 7,
             week_start_day: 0,
@@ -183,6 +191,10 @@ fn default_repos_dir() -> PathBuf {
 
 fn default_claude_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".claude")
+}
+
+fn default_pi_dir() -> PathBuf {
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".pi")
 }
 
 fn default_timezone() -> String {

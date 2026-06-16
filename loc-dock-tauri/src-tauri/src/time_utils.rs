@@ -24,3 +24,28 @@ pub fn week_start(now: &DateTime<Tz>, hour: u32, week_start_day: u32) -> DateTim
         .rem_euclid(7) as i64;
     ds - Duration::days(days_since)
 }
+
+/// Compute the start of the current month at the given day-start hour.
+#[allow(dead_code)] // ponytail: month/year descoped from hot path, keep for future manual triggers
+pub fn month_start(now: &DateTime<Tz>, hour: u32) -> DateTime<Tz> {
+    let ds = day_start(now, hour);
+    ds
+        .with_day(1)
+        .and_then(|d| d.with_hour(hour))
+        .and_then(|d| d.with_minute(0))
+        .and_then(|d| d.with_second(0))
+        .unwrap_or(ds)
+}
+
+/// Compute the start of the current year at the given day-start hour.
+#[allow(dead_code)] // ponytail: month/year descoped from hot path, keep for future manual triggers
+pub fn year_start(now: &DateTime<Tz>, hour: u32) -> DateTime<Tz> {
+    let ds = day_start(now, hour);
+    ds
+        .with_month(1)
+        .and_then(|d| d.with_day(1))
+        .and_then(|d| d.with_hour(hour))
+        .and_then(|d| d.with_minute(0))
+        .and_then(|d| d.with_second(0))
+        .unwrap_or(ds)
+}

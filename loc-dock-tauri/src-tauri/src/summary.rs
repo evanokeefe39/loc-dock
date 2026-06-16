@@ -388,15 +388,31 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
     let has_key = api_key.is_some();
 
     std::thread::spawn(move || {
+        if !has_key {
+            // ponytail: no API key → emit no_api_key once, then sleep forever (no git scans)
+            let _ = app.emit("summary-update", &SummaryData { no_api_key: true, ..Default::default() });
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(300));
+                // Re-check: user might have added key (requires app restart anyway, but harmless)
+                if config.settings.llm_api_key.as_ref().filter(|k| !k.is_empty()).is_some()
+                    || std::env::var("DEEPSEEK_API_KEY").ok().filter(|k| !k.is_empty()).is_some() {
+                    break; // restart the full loop with git scans
+                }
+            }
+        }
+
         let tz: Tz = config
             .settings
             .timezone
             .parse()
             .unwrap_or(chrono_tz::UTC);
-        let store = if has_key { Some(SummaryStore::new(&config.settings.summary_cache_dir)) } else { None };
+        let store = SummaryStore::new(&config.settings.summary_cache_dir);
         let debounce_secs = config.settings.summary_debounce_secs.max(60);
         let mut last_call: Option<Instant> = None;
         let queue = app.state::<TaskQueue>();
+        let api_key = config.settings.llm_api_key.clone()
+            .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok())
+            .filter(|k| !k.is_empty());
 
         std::thread::sleep(std::time::Duration::from_secs(1));
 
@@ -429,20 +445,20 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
             queue.complete(collect_id);
             let _ = app.emit("tasks-changed", ());
 
-            let day_cached: Vec<RepoSummary> = store.as_ref()
-                .and_then(|s| s.get_summary(&day_date, "day"))
+            let day_cached: Vec<RepoSummary> = store
+                .get_summary(&day_date, "day")
                 .and_then(|json| serde_json::from_str(&json).ok())
                 .unwrap_or_default();
-            let week_cached: Vec<RepoSummary> = store.as_ref()
-                .and_then(|s| s.get_summary(&week_date, "week"))
+            let week_cached: Vec<RepoSummary> = store
+                .get_summary(&week_date, "week")
                 .and_then(|json| serde_json::from_str(&json).ok())
                 .unwrap_or_default();
 
             let day_display = build_repos(&day_commits, &day_cached);
             let week_display = build_repos(&week_commits, &week_cached);
 
-            let day_loading = has_key && !day_commits.is_empty() && day_cached.is_empty();
-            let week_loading = has_key && !week_commits.is_empty() && week_cached.is_empty();
+            let day_loading = !day_commits.is_empty() && day_cached.is_empty();
+            let week_loading = !week_commits.is_empty() && week_cached.is_empty();
 
             let _ = app.emit("summary-update", &SummaryData {
                 day_prs: count_prs(&day_display),
@@ -454,10 +470,12 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
                 week_repo_count: week_total_repos,
                 week_commits: week_total_commits,
                 loading: day_loading || week_loading,
-                no_api_key: !has_key,
+                no_api_key: false,
             });
 
-            if let (Some(ref key), Some(ref store)) = (&api_key, &store) {
+            // LLM call block — we only reach here with a valid API key
+            {
+                let key = api_key.as_ref().unwrap();
                 let debounce_ok = last_call
                     .map(|t| t.elapsed().as_secs() >= debounce_secs)
                     .unwrap_or(true);
@@ -501,12 +519,12 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
                 }
             }
 
-            let day_final_cached: Vec<RepoSummary> = store.as_ref()
-                .and_then(|s| s.get_summary(&day_date, "day"))
+            let day_final_cached: Vec<RepoSummary> = store
+                .get_summary(&day_date, "day")
                 .and_then(|json| serde_json::from_str(&json).ok())
                 .unwrap_or_default();
-            let week_final_cached: Vec<RepoSummary> = store.as_ref()
-                .and_then(|s| s.get_summary(&week_date, "week"))
+            let week_final_cached: Vec<RepoSummary> = store
+                .get_summary(&week_date, "week")
                 .and_then(|json| serde_json::from_str(&json).ok())
                 .unwrap_or_default();
             let day_final = build_repos(&day_commits, &day_final_cached);
@@ -522,7 +540,7 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
                 week_repo_count: week_total_repos,
                 week_commits: week_total_commits,
                 loading: false,
-                no_api_key: !has_key,
+                no_api_key: false,
             };
             let _ = app.emit("summary-update", &data);
 

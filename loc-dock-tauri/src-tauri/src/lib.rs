@@ -5,6 +5,7 @@ mod git;
 mod git_cache;
 mod job_log;
 mod pricing;
+mod source_adapter;
 mod summary;
 mod task_queue;
 mod theme;
@@ -24,7 +25,7 @@ use types::AllStats;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    env_logger::init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let config = Arc::new(Config::load());
     let theme = Theme::load(&config.settings.theme_path);

@@ -11,9 +11,14 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager};
+
+/// Latest computed summary, shared with the `get_summary` command so the UI reads
+/// cached state (instant) instead of triggering on-demand git scans on the main
+/// thread. Mirrors `data::SharedStats`.
+pub type SharedSummary = Arc<RwLock<SummaryData>>;
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct RepoSummary {
@@ -370,11 +375,22 @@ fn summarize_repos(
 }
 
 /// Main summary loop — runs in its own thread.
-pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
+pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>, shared: SharedSummary) {
     if !config.settings.summary_enabled {
         info!("Summary feature disabled");
         return;
     }
+
+    // Push every emitted snapshot into shared state too, so the get_summary command
+    // (and any new listener) reads the latest without re-running git.
+    let publish = {
+        let app = app.clone();
+        let shared = shared.clone();
+        move |data: &SummaryData| {
+            if let Ok(mut g) = shared.write() { *g = data.clone(); }
+            let _ = app.emit("summary-update", data);
+        }
+    };
 
     let api_key = config
         .settings
@@ -390,7 +406,7 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
     std::thread::spawn(move || {
         if !has_key {
             // ponytail: no API key → emit no_api_key once, then sleep forever (no git scans)
-            let _ = app.emit("summary-update", &SummaryData { no_api_key: true, ..Default::default() });
+            publish(&SummaryData { no_api_key: true, ..Default::default() });
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(300));
                 // Re-check: user might have added key (requires app restart anyway, but harmless)
@@ -460,7 +476,7 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
             let day_loading = !day_commits.is_empty() && day_cached.is_empty();
             let week_loading = !week_commits.is_empty() && week_cached.is_empty();
 
-            let _ = app.emit("summary-update", &SummaryData {
+            publish(&SummaryData {
                 day_prs: count_prs(&day_display),
                 day_repos: day_display,
                 day_repo_count: day_total_repos,
@@ -542,7 +558,7 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>) {
                 loading: false,
                 no_api_key: false,
             };
-            let _ = app.emit("summary-update", &data);
+            publish(&data);
 
             let total_ms = cycle_start.elapsed().as_millis();
             let timing = format!("Summary cycle: {}ms (git:{}ms)", total_ms, git_ms);
@@ -565,61 +581,3 @@ pub fn reset_summaries(config: &Config) -> Result<(), String> {
     Ok(())
 }
 
-/// Tauri command to get current summary state on demand.
-pub fn get_current_summary(config: &Config) -> SummaryData {
-    if !config.settings.summary_enabled {
-        return SummaryData::default();
-    }
-
-    let tz: Tz = config
-        .settings
-        .timezone
-        .parse()
-        .unwrap_or(chrono_tz::UTC);
-    let now_local = Utc::now().with_timezone(&tz);
-    let day_s = time_utils::day_start(&now_local, config.settings.day_start_hour);
-    let week_s = time_utils::week_start(&now_local, config.settings.day_start_hour, config.settings.week_start_day);
-    let exclude = &config.settings.summary_exclude_pattern;
-
-    let day_since = day_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
-    let week_since = week_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
-    let day_commits = collect_commits_filtered(&config.settings.repos_dir, &day_since, exclude);
-    let week_commits = collect_commits_filtered(&config.settings.repos_dir, &week_since, exclude);
-
-    let has_key = config.settings.llm_api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false)
-        || std::env::var("DEEPSEEK_API_KEY").map(|k| !k.is_empty()).unwrap_or(false);
-
-    let day_date = day_s.format("%Y-%m-%d").to_string();
-    let week_date = week_s.format("%Y-%m-%d").to_string();
-
-    let load_cached = |date: &str, scope: &str| -> Vec<RepoSummary> {
-        if !has_key { return Vec::new(); }
-        let db_path = config.settings.summary_cache_dir.join("summaries.db");
-        if !db_path.exists() { return Vec::new(); }
-        Connection::open(&db_path).ok()
-            .and_then(|con| {
-                con.prepare("SELECT summary FROM summaries WHERE date = ? AND scope = ?").ok()
-                    .and_then(|mut stmt| stmt.query_row(duckdb::params![date, scope], |row| row.get::<_, String>(0)).ok())
-            })
-            .and_then(|json| serde_json::from_str(&json).ok())
-            .unwrap_or_default()
-    };
-
-    let day_cached = load_cached(&day_date, "day");
-    let week_cached = load_cached(&week_date, "week");
-    let day_repos = build_repos(&day_commits, &day_cached);
-    let week_repos = build_repos(&week_commits, &week_cached);
-
-    SummaryData {
-        day_prs: count_prs(&day_repos),
-        day_repos,
-        day_repo_count: day_commits.len(),
-        day_commits: day_commits.values().map(|v| v.len()).sum(),
-        week_prs: count_prs(&week_repos),
-        week_repos,
-        week_repo_count: week_commits.len(),
-        week_commits: week_commits.values().map(|v| v.len()).sum(),
-        loading: false,
-        no_api_key: !has_key,
-    }
-}

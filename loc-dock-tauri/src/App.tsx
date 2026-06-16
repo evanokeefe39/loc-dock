@@ -31,16 +31,19 @@ function App() {
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [hideNoPrs, setHideNoPrs] = useState(false);
 
+  // The Rust side already shows + positions the window at startup (decoupled from
+  // the frontend). Here we just ensure size/corner once mounted — idempotent, same
+  // position, so no flash. show() is a belt-and-suspenders fallback, not gated on
+  // theme or data.
   useEffect(() => {
-    if (!shown.current && theme) {
-      shown.current = true;
-      const win = getCurrentWindow();
-      win.setSize(new LogicalSize(500, 340))
-        .then(() => invoke("snap_to_corner", { corner: "bottom-right" }))
-        .then(() => win.show())
-        .catch(() => win.show());
-    }
-  }, [theme]);
+    if (shown.current) return;
+    shown.current = true;
+    const win = getCurrentWindow();
+    win.show().catch(() => {});
+    win.setSize(new LogicalSize(500, 340))
+      .then(() => invoke("snap_to_corner", { corner: "bottom-right" }))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     invoke<{ hide_repos_without_prs: boolean }>("get_settings")

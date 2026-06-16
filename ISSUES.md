@@ -26,5 +26,8 @@ Post-V2 hardening pass over the shipped medallion ETL + decoupled client/server 
 
 ## Resolved
 
+### #7 — `tauri dev` fails: `bundled-cmake requires a duckdb-rs checkout`
+Root cause: `duckdb = { version = "1", features = ["bundled-cmake"] }` paired a crates.io dependency with a feature that only works from a duckdb-rs git checkout — the published `libduckdb-sys` ships `duckdb.tar.gz` (amalgamation), not the `duckdb-sources/` CMake tree. It never produced a green build (CI failing since the switch), and the original MSVC 14.51 `CXXFLAGS` workaround had also been dropped from CI. Fixed by reverting to `features = ["bundled"]` (cc amalgamation, crates.io-compatible) and restoring `CXXFLAGS=-D_ITERATOR_DEBUG_LEVEL=0` durably in `src-tauri/.cargo/config.toml` so local dev and CI build identically. Verified `cargo check --no-default-features` compiles on MSVC 14.51.
+
 ### #4 — Settings don't persist after restart, save breaks after autostart toggle
 Root cause: `get_settings` reads from immutable `Arc<Config>` loaded once at startup — never reflects saved values. Also `save_settings` couples .env write with autostart registry write in one error path, so autostart failure blocks the entire save. Fixed by making `get_settings` read from disk and making autostart failure non-fatal in save.

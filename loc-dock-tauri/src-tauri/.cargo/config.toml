@@ -1,0 +1,11 @@
+# DuckDB is bundled via its C++ amalgamation (duckdb crate `bundled` feature),
+# compiled by the `cc` crate. MSVC 14.51 (VS 2026) removed
+# `stdext::checked_array_iterator`, which the bundled `fmt` library uses behind
+# `_SECURE_SCL`. Defining `_ITERATOR_DEBUG_LEVEL=0` prevents `_SECURE_SCL` from
+# being set and skips that code path, so the amalgamation compiles on MSVC.
+#
+# Set here (not just in CI) so local `tauri dev` and CI build identically. The
+# flag is an unused macro define on clang/gcc, so it is harmless on macOS/Linux.
+# `force = true` ensures it applies even if the shell already exports CXXFLAGS.
+[env]
+CXXFLAGS = { value = "-D_ITERATOR_DEBUG_LEVEL=0", force = true }

@@ -121,57 +121,84 @@ You can maintain multiple theme files and switch between them via the settings p
 
 ## Architecture
 
+The Rust backend owns all data; the React frontend is a pure renderer. Two
+independent background loops compute stats and write them into shared in-memory
+state. The frontend polls that state via async Tauri commands -- it never touches
+data sources and never blocks on a slow backend.
+
 ```mermaid
 flowchart LR
-    subgraph Data Sources
+    subgraph Sources
         GIT[Git repos]
-        JSONL[Claude Code JSONL]
+        JSONL[Claude / Pi JSONL]
         ENV[.env config]
     end
 
-    subgraph Rust Backend
-        config[config.rs]
-        theme[theme.rs]
-        git[git.rs]
-        usage[usage_store.rs]
-        data[data.rs]
-        commands[commands.rs]
-        tray[tray.rs]
+    subgraph "Rust backend"
+        direction TB
+        subgraph "Data loop (interval)"
+            git[git.rs + git_cache.rs]
+            usage[usage_store.rs<br/>DuckDB medallion ETL]
+            data[data.rs]
+        end
+        subgraph "Summary loop (interval)"
+            summary[summary.rs<br/>commits + LLM]
+        end
+        STATE[(SharedStats /<br/>SharedSummary<br/>RwLock)]
+        commands[commands.rs<br/>async handlers]
     end
 
-    subgraph React Frontend
+    subgraph "React frontend"
+        hooks[hooks: useStats / useSummary]
         App[App.tsx]
-        TopRow[TopRow.tsx]
-        Chart[Chart.tsx]
-        BottomRow[BottomRow.tsx]
-        Tooltip[CostTooltip.tsx]
-        Settings[SettingsPanel.tsx]
+        ui[TopRow · Chart · BottomRow<br/>SummaryPanel · SettingsPanel]
     end
 
-    GIT -- git log --> git
-    JSONL -- DuckDB --> usage
-    ENV --> config
+    GIT --> git --> data
+    JSONL --> usage --> data
+    ENV --> data & summary
+    GIT --> summary
 
-    git --> data
-    usage --> data
-    config --> data
-    theme --> App
-
-    data -- "AllStats JSON (60s)" --> App
-    App --> TopRow & Chart & BottomRow & Tooltip
-    commands <-- "Tauri IPC" --> Settings
-    tray -. show/hide .-> App
+    data --> STATE
+    summary --> STATE
+    STATE --> commands
+    commands <-- "Tauri IPC (poll ~10s)" --> hooks
+    hooks --> App --> ui
 ```
 
-The Rust backend owns all data: git subprocess scanning, DuckDB queries, stat precomputation. It pushes a single `AllStats` JSON blob to the frontend every 60 seconds via Tauri events. The React frontend is a pure renderer with zero data logic.
+### Data path (medallion ETL)
+
+`usage_store.rs` treats DuckDB as the ETL engine; Rust is thin orchestration. Session
+JSONL flows through three layers:
+
+- **Bronze** -- ephemeral `read_ndjson_objects` CTE reads raw JSONL via glob with zero
+  schema inference (auto-inference OOM-crashes on heterogeneous logs).
+- **Silver** -- one `INSERT ... SELECT` per source maps bronze into the canonical
+  `entries` table: typed fields extracted by JSON path, cost flat-priced as a column,
+  deduped by `(source, session_id, ts)`.
+- **Gold** -- `daily_aggregates`, a materialized per-date/per-source rollup that the
+  serving queries read.
+
+Ingestion is incremental: an `ingested_files (path, mtime, size)` registry means each
+cycle only re-reads files that changed. Cold starts micro-batch the full glob to cap
+JSON-parse memory.
+
+### Control path
+
+The data loop scans git (`git.rs`, cached per-repo SHA/ts in `git_cache.rs`), runs the
+ETL, builds `AllStats` for day/week ranges, and writes it to a shared `RwLock`. The
+summary loop independently collects recent commits and calls an LLM for a written
+summary, writing to its own shared state. Tauri commands (`get_stats`, `get_summary`)
+are `async` and only read shared state, so the dock stays responsive regardless of
+backend work.
 
 ## How it works
 
-1. Scans all git repos in `REPOS_DIR` for commits since day/week start
-2. Reads Claude Code JSONL session files via DuckDB with message-level deduplication
-3. Precomputes all stats (tokens, cost, sessions, chart buckets) for both day and week ranges
-4. Pushes updates to the frontend every 60 seconds
-5. Frontend picks the active range and renders -- no queries on toggle
+1. Data loop scans every git repo in `REPOS_DIR` for commits since week start (cached, incremental per repo)
+2. DuckDB ingests changed Claude/Pi JSONL files through bronze -> silver -> gold, deduped by message key
+3. Stats (tokens, cost, sessions, chart buckets) are precomputed for day and week and stored in shared state
+4. The summary loop separately summarizes recent commits via LLM into shared state
+5. Frontend polls `get_stats` / `get_summary` (~10s) and renders the active range -- no queries on toggle
 
 ## License
 

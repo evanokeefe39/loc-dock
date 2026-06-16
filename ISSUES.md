@@ -1,4 +1,11 @@
-# Issues
+# ISSUES
+
+Local issue tracker for LOC Dock. No external tracker — this file is the source of truth.
+
+**Conventions:** sequential `#N` ids (never reused). New issues go under **Open** with a
+short title, root cause / context, and any blockers. When closed, move the entry to
+**Resolved** with a one-line note on the fix (and commit/PR if relevant). Reference issues
+in commits as `#N`.
 
 ## Open
 

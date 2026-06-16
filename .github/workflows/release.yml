@@ -14,7 +14,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: windows-latest
+          # Pinned to VS 2022 (still ships stdext::checked_array_iterator) —
+          # windows-latest is on VS 2026 whose STL dropped it, breaking the
+          # bundled DuckDB fmt build. See ISSUES.md #7.
+          - platform: windows-2022
             args: ""
           - platform: macos-latest
             args: "--target aarch64-apple-darwin"

@@ -1,3 +1,4 @@
+use crate::pricing::Pricing;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -52,6 +53,7 @@ pub struct Config {
     pub config_dir: PathBuf,
     pub projects_dir: PathBuf,
     pub pi_sessions_dir: PathBuf,
+    pub pricing: Pricing,
 }
 
 impl Config {
@@ -60,7 +62,8 @@ impl Config {
         let settings = Settings::load(&config_dir);
         let projects_dir = settings.claude_dir.join("projects");
         let pi_sessions_dir = settings.pi_dir.join("agent").join("sessions");
-        Config { settings, config_dir, projects_dir, pi_sessions_dir }
+        let pricing = Pricing::load(&config_dir);
+        Config { settings, config_dir, projects_dir, pi_sessions_dir, pricing }
     }
 
     pub fn config_dir() -> PathBuf {

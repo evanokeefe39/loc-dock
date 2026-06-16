@@ -13,18 +13,23 @@ for the full plan and spike results.
 - `summary.rs::spawn_summary_loop` — collects recent commits + LLM summary into
   `SharedSummary`. Fully independent of the data loop (owns all its own git/LLM work).
 - Frontend hooks (`useStats`, `useSummary`) poll `get_stats` / `get_summary` every ~10s.
-  Commands are `async` and only read shared state — they never block the UI. Loops also
-  emit `stats-update` / `summary-update` / `tasks-changed` events.
+  Commands are `async` and only read shared state — they never block the UI. The summary
+  loop emits `summary-update` events (frontend listens for instant updates) and both loops
+  emit `tasks-changed` events (toast spinner reactivates immediately). Events are used only
+  where latency matters — core stats are pure polling (simpler, no serialization on the hot path).
 
 **Medallion ETL (`usage_store.rs`):**
 - **Bronze** — ephemeral `read_ndjson_objects` CTE per batch. Raw JSONL via glob, zero
   schema inference (`read_ndjson_auto` OOM-crashes on heterogeneous logs — Spike §11).
-- **Silver** — `entries` table. One `INSERT...SELECT` per source (`claude_silver_sql`,
-  `pi_silver_sql`) extracts fields by JSON path, flat-prices cost as a column, dedups by
+- **Silver** — `entries` table. One `INSERT...SELECT` per source loads SQL from
+  `.sql` template files (`sql/claude-silver.sql`, `sql/pi-silver.sql`). Extracts
+  fields by JSON path, flat-prices cost via `pricing.yaml`, dedups by
   `(source, session_id, ts)`.
 - **Gold** — `daily_aggregates` materialized per-date/per-source rollup. Serving queries
   read gold; multi-day `sessions_total` queries `entries` directly (distinct counts are
   not additive — Spike 5).
+- **Config-driven** — pricing and silver extraction SQL are externalized to
+  user-editable files. No recompile needed when provider pricing or JSONL schemas change.
 - **Incremental ingest** — `ingested_files (path, mtime, size)` registry; each cycle
   re-reads only changed files. Cold start micro-batches the full glob to cap JSON-parse
   memory.
@@ -80,12 +85,13 @@ and double row counts.
 |------|---------|----------|
 | `src/lib.rs` | App bootstrap: manage shared state, register commands, spawn both loops | — |
 | `src/data.rs` | Data loop: git scan + ETL → builds `AllStats` into `SharedStats` | first-paint prefill from gold |
-| `src/usage_store.rs` | DuckDB medallion ETL (bronze/silver/gold) + serving queries | schema v6; `INSERT OR IGNORE` not Appender (BUG-004) |
-| `src/source_adapter.rs` | Glob file discovery, `SourceManager` (Claude + Pi) | JSON parsing moved into SQL |
+| `src/usage_store.rs` | DuckDB medallion ETL (bronze/silver/gold) + serving queries + `.sql` template loader | schema v6; `INSERT OR IGNORE` not Appender (BUG-004); SQL from templates with user override in `~/.config/loc-dock/sql/` |
+| `loc-dock-tauri/src-tauri/sql/claude-silver.sql` | Claude silver extraction SQL template | user override: `~/.config/loc-dock/sql/claude-silver.sql` |
+| `loc-dock-tauri/src-tauri/sql/pi-silver.sql` | Pi silver extraction SQL template | user override: `~/.config/loc-dock/sql/pi-silver.sql` |
 | `src/git.rs` | Git log scanning + numstat parse | incremental since cached `latest_ts` |
 | `src/git_cache.rs` | Per-repo SHA/ts cache (DuckDB-backed) | skips unchanged repos |
 | `src/summary.rs` | Independent loop: commit collection + LLM summary → `SharedSummary` | own git/LLM work; never blocks data loop |
-| `src/pricing.rs` | Flat per-token cost (also applied in silver SQL) | — |
+| `src/pricing.rs` | `Pricing` struct loaded from `pricing.yaml` (per-Mtok cost) | externalized; user edits without recompile; creates default if absent |
 | `src/task_queue.rs` | Active-task tracking for the UI (`get_active_tasks`) | — |
 | `src/job_log.rs` | Job-run logging (`get_job_logs` / `clear_job_logs`) | — |
 | `src/time_utils.rs` | Day/week boundary math | — |

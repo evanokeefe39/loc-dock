@@ -14,7 +14,7 @@ use tauri::{AppHandle, Manager, Window};
 // like request handlers in a web server — never on the main/UI thread. This keeps
 // the dock responsive no matter how slow a handler is. The frontend already treats
 // every command as an async API call (invoke -> Promise) and receives server-push
-// updates via emitted events (stats-update, summary-update, tasks-changed).
+// updates via emitted events (summary-update, tasks-changed).
 
 #[tauri::command]
 pub async fn get_theme(app: AppHandle) -> Theme {

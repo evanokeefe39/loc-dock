@@ -15,16 +15,29 @@ Installers are unsigned. Windows SmartScreen and macOS Gatekeeper warn on first 
 ### #2 — No auto-updater
 `tauri-plugin-updater` not integrated. Users must manually download new versions. Blocked by #1 (signing required).
 
-### #3 — Active session timeout hardcoded
-`data.rs` uses 5-minute timeout to determine active sessions. Should be configurable via settings.
+## Resolved
+
+### #6 — Config-driven ETL: externalize pricing + SQL transformations
+Pricing constants (input/output/cache per-million-token costs) moved from `pricing.rs` into `pricing.yaml` in the config dir. Silver extraction SQL (claude-silver.sql, pi-silver.sql) moved into user-overridable template files in `~/.config/loc-dock/sql/`. Users can edit these files without recompiling when:
+  - Provider pricing changes (edit pricing.yaml)
+  - JSONL schema changes for Claude or Pi (edit the .sql files)
+  - New models with different pricing (edit pricing.yaml)
+
+Changes:
+  - `pricing.rs`: now a `Pricing` struct loaded from pricing.yaml (creates default if absent)
+  - `usage_store.rs`: loads SQL templates from bundled include_str! with user override in config dir
+  - `config.rs`: holds `pricing` (Pricing) field
+  - `sql/claude-silver.sql`, `sql/pi-silver.sql`: bundled template files
+  - Dropped unused `stats-update` event emits from data.rs frontend polls get_stats
 
 ### #5 — Redundant push/pull data path (hybrid emit + poll)
-Backend both emits Tauri events (`stats-update`, `summary-update`, `tasks-changed`) and serves the same data via async commands (`get_stats`, `get_summary`). Frontend hooks only poll the commands (~10s); the event emits are unused by the current UI. Decide during the hardening pass whether to drop the event emits (simpler, one path) or switch the frontend to event-driven (lower latency, no polling). Pick one path. Low risk; cleanup, not correctness.
+`stats-update` emits (unused — frontend polls `get_stats`) were dropped. Remaining events (`summary-update`, `tasks-changed`) are each listened to by the frontend with the right pattern:
+  - `summary-update`: event-driven with initial fetch (instant UI updates for infrequent data)
+  - `tasks-changed`: event notification triggers `get_active_tasks` poll (spinner reactivity)
+  - Stats: polling `get_stats` every 10s (right for high-frequency data)
 
-### #6 — Review and harden current architecture
-Post-V2 hardening pass over the shipped medallion ETL + decoupled client/server design (see AGENTS.md). Scope TBD: error-path/edge-case review (cold start, retention boundary, malformed JSONL), the `RwLock` access patterns, ingest registry correctness under rotation, resolving #5, and confirming the gotchas in AGENTS.md still hold. Produce a focused plan before changing code.
-
-## Resolved
+### #3 — Active session timeout hardcoded (already configurable)
+`Settings.session_idle_timeout` (default 300s) was already exposed in the Settings struct and the frontend SettingsPanel UI. No code change needed. Stale from earlier version.
 
 ### #7 — `tauri dev` fails: `bundled-cmake requires a duckdb-rs checkout`
 Two stacked bugs. (1) `features = ["bundled-cmake"]` pairs a crates.io dep with a feature that only works from a duckdb-rs git checkout — the published `libduckdb-sys` ships `duckdb.tar.gz` (amalgamation), not the `duckdb-sources/` CMake tree — so it never built. Fixed by reverting to `features = ["bundled"]` (the cc amalgamation path, crates.io-compatible). (2) That surfaced an MSVC build break: the bundled DuckDB's old `fmt` uses `stdext::checked_array_iterator`, removed in VS 2026's STL (MSVC 14.51.36231), under `#ifdef _SECURE_SCL`. The `CXXFLAGS=-D_ITERATOR_DEBUG_LEVEL=0` "workaround" (commit 2411597) was backwards: explicitly setting `_ITERATOR_DEBUG_LEVEL` makes the STL *define* `_SECURE_SCL`, flipping fmt onto the broken path. Modern MSVC leaves `_SECURE_SCL` undefined by default (safe `#else`), so the fix is to **not** set that flag — removed `src-tauri/.cargo/config.toml`. Also drop dev debug info for `libduckdb-sys` to speed builds. The real cause of CI failing where local succeeded: GitHub's `windows-latest` moved to VS 2026, whose STL removed `stdext::checked_array_iterator`; pinned the Windows runner to `windows-2022` (still ships it) in both workflows. Hardened against future drift by pinning the exact DuckDB version and the Rust toolchain (`rust-toolchain.toml`) — the bundled build compiles DuckDB's C++ from source, so frozen inputs keep it deterministic and cacheable. CI green on Windows/macOS/Linux (PR #12).

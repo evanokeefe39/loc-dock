@@ -12,3 +12,9 @@ __pycache__/
 .pi/
 .pi/
 spike/
+
+# Windows / crash artifacts
+*.stackdump
+nul
+# throwaway spike example
+loc-dock-tauri/src-tauri/examples/

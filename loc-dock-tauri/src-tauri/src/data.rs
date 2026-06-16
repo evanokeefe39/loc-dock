@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::git::{self, GitPoint};
 use crate::git_cache;
 use crate::job_log;
-use crate::source_adapter::{ClaudeParser, GlobFileDiscoverer, PiParser, SourceManager};
+use crate::source_adapter::{GlobFileDiscoverer, SourceKind, SourceManager};
 use crate::task_queue::TaskQueue;
 use crate::time_utils;
 use crate::types::*;
@@ -28,8 +28,8 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
             vec![],
         );
         let source_manager = SourceManager::with_discoverers(vec![
-            (Box::new(claude_discoverer), Box::new(ClaudeParser::new())),
-            (Box::new(pi_discoverer), Box::new(PiParser::new())),
+            (Box::new(claude_discoverer), SourceKind::Claude),
+            (Box::new(pi_discoverer), SourceKind::Pi),
         ]);
         let mut store = UsageStore::new(source_manager, &config.settings.usage_cache_dir);
         let tz: Tz = config.settings.timezone.parse().unwrap_or(chrono_tz::UTC);

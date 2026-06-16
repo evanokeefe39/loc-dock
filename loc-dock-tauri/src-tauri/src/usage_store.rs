@@ -1,20 +1,23 @@
-use crate::source_adapter::{FileDiscoverer, NormalizedEntry, SessionParser, SourceManager};
+use crate::source_adapter::{FileDiscoverer, SourceKind, SourceManager};
 use crate::types::{CostBreakdown, SourceStats, TokenTotals};
 use chrono::{DateTime, Utc};
 use duckdb::Connection;
 use log::{info, warn};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::fs;
-use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 const RETENTION_DAYS: f64 = 7.0;
 const DAY_SECS: f64 = 86400.0;
 const DB_NAME: &str = "usage_cache.db";
 const MARKER: &str = "usage_cache.db.reset";
-const SCHEMA_VERSION: &str = "5";  // daily_aggregates materialized table
+const SCHEMA_VERSION: &str = "6";  // V2: SQL silver ingest, no Rust parsers / file_tracker
+
+/// Files ingested per silver INSERT. Caps transient JSON-parse memory on cold
+/// rebuilds (Spike 4b: 16 files + 512 MB guard rail peaks ~150 MB).
+const INGEST_BATCH_FILES: usize = 16;
+const MAX_OBJECT_SIZE: u64 = 64 * 1024 * 1024;  // 64 MB; default 16 MB too small (edge case)
 
 // ponytail: kept for future use; per-source ETL in data loop doesn't need this
 #[allow(dead_code)]
@@ -82,6 +85,14 @@ impl UsageStore {
 
         let con = Connection::open(&db_path).expect("failed to open usage_cache.db");
 
+        // Guard rails for the SQL JSON-ingest path (Spike 4b): the read_ndjson
+        // parse path holds non-spillable buffers, so a tight memory_limit acts as
+        // a high ceiling, not a spill trigger. 512 MB + micro-batching keeps cold
+        // rebuilds bounded; preserve_insertion_order=false lowers peak further.
+        let _ = con.execute_batch(
+            "SET memory_limit='512MB'; SET preserve_insertion_order=false;",
+        );
+
         // Ensure meta table exists (check schema version)
         con.execute_batch(
             "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
@@ -97,7 +108,9 @@ impl UsageStore {
 
         if stored_ver != SCHEMA_VERSION {
             let _ = con.execute_batch(
-                "DROP TABLE IF EXISTS entries; DROP TABLE IF EXISTS watermarks;"
+                "DROP TABLE IF EXISTS entries; \
+                 DROP TABLE IF EXISTS watermarks; \
+                 DROP TABLE IF EXISTS file_tracker;"
             );
             info!("Schema version {} → {}: reset tables", stored_ver, SCHEMA_VERSION);
         }
@@ -146,18 +159,6 @@ impl UsageStore {
                  loc_added        BIGINT NOT NULL DEFAULT 0,
                  loc_deleted      BIGINT NOT NULL DEFAULT 0,
                  UNIQUE(date, source)
-             );
-"
-        );
-
-        // v5: file_tracker — tracks per-file state for append-only reading.
-        // Avoids re-reading unchaged JSONL files every cycle.
-        let _ = con.execute_batch(
-            "CREATE TABLE IF NOT EXISTS file_tracker (
-                 file_path        TEXT PRIMARY KEY,
-                 mtime            DOUBLE NOT NULL,
-                 size             BIGINT NOT NULL,
-                 last_entry_ts    TIMESTAMP
              );
 "
         );
@@ -211,7 +212,7 @@ impl UsageStore {
 
         for pair in &self.source_manager.pairs {
             if pair.1.name() == name {
-                let n = process_source(&mut self.con, &*pair.0, &*pair.1, name, cutoff)?;
+                let n = process_source(&self.con, &*pair.0, pair.1, cutoff)?;
                 self.initialized = true;
                 return Ok(n);
             }
@@ -274,250 +275,218 @@ impl UsageStore {
     }
 }
 
-/// Tracked file state for append-only reading.
-#[derive(Debug, Clone)]
-struct FileTrackerState {
-    mtime: f64,
-    size: u64,
-    last_entry_ts: Option<String>,  // stored as "YYYY-MM-DD HH:MM:SS"
-}
-
-/// Query the file tracker for a given path.
-fn get_file_tracker(con: &Connection, path: &Path) -> Option<FileTrackerState> {
-    let path_str = path.to_string_lossy().replace('\\', "/");
-    con.prepare(
-        "SELECT mtime, size, last_entry_ts FROM file_tracker WHERE file_path = ?"
-    ).ok().and_then(|mut stmt| {
-        stmt.query_row([&path_str], |row| {
-            Ok(FileTrackerState {
-                mtime: row.get(0)?,
-                size: row.get::<_, i64>(1)? as u64,
-                last_entry_ts: row.get::<_, Option<String>>(2)?,
-            })
-        }).ok()
-    })
-}
-
-/// Update the file tracker for a given path.
-fn update_file_tracker(
-    con: &Connection,
-    path: &Path,
-    mtime: f64,
-    size: u64,
-    last_entry_ts: Option<String>,
-) -> Result<(), String> {
-    let path_str = path.to_string_lossy().replace('\\', "/");
-    con.execute(
-        "INSERT OR REPLACE INTO file_tracker (file_path, mtime, size, last_entry_ts)
-         VALUES (?1, ?2, ?3, ?4)",
-        duckdb::params![path_str, mtime, size as i64, last_entry_ts],
-    ).map_err(|e| format!("Update file tracker: {}", e))?;
-    Ok(())
-}
-
-/// Process one source: discover files within cutoff, stat-and-track for
-/// append-only reading, parse only new/changed content, insert.
+/// Process one source: discover files within the retention window, then ingest
+/// them into the silver `entries` table via DuckDB SQL (bronze `read_ndjson_objects`
+/// + per-source extraction). No Rust JSON parsing, no byte seek/tail tracking.
 ///
-/// File tracking algorithm:
-/// 1. Stat each discovered file — compare mtime + size against tracker
-/// 2. If unchanged (mtime + size match) → skip entirely
-/// 3. If size >= tracked_size → append-only: seek to tracked_size, read new bytes
-/// 4. If size < tracked_size → rotated/truncated: full read from beginning
-/// 5. Cold start (no tracker entry) → full read
-/// 6. Update tracker after successful read
+/// Files are micro-batched (Spike 4b) to cap the non-spillable JSON-parse memory
+/// on cold rebuilds. Discovery stays in Rust so the read is bounded to the 7-day
+/// window — globbing in DuckDB would read full history (Spike 4 memory regression).
 fn process_source(
-    con: &mut Connection,
+    con: &Connection,
     discoverer: &dyn FileDiscoverer,
-    parser: &dyn SessionParser,
-    source_name: &str,
+    kind: SourceKind,
     cutoff: f64,
 ) -> Result<usize, String> {
     let (all_files, _max_mtime) = match discoverer.discover_files(cutoff) {
         Ok(r) => r,
-        Err(e) => { warn!("ETL '{}': discover failed: {}", source_name, e); return Ok(0); }
+        Err(e) => { warn!("ETL '{}': discover failed: {}", kind.name(), e); return Ok(0); }
     };
 
     if all_files.is_empty() {
         return Ok(0);
     }
 
-    info!("ETL '{}': {} files in window (cutoff={}h ago)", source_name, all_files.len(),
+    info!("ETL '{}': {} files in window (cutoff={:.0}h ago)", kind.name(), all_files.len(),
         (SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs_f64() - cutoff) / 3600.0
     );
 
+    // Pi carry-forward (model_change → assistant rows) needs intra-file row order,
+    // so Pi ingests one file per statement under preserve_insertion_order=true.
+    // Claude has no window functions → larger batches, order-independent.
+    let batch_files = match kind {
+        SourceKind::Claude => INGEST_BATCH_FILES,
+        SourceKind::Pi => 1,
+    };
+
     let mut total = 0usize;
-    let mut files_read = 0usize;
-    let mut files_skipped = 0usize;
-
-    for chunk in all_files.chunks(10) {
-        let mut batch = Vec::with_capacity(500);
-        for path in chunk {
-            // Stat the file (cheap — no I/O other than metadata)
-            let metadata = match fs::metadata(path) {
-                Ok(m) => m,
-                Err(e) => {
-                    warn!("ETL '{}': stat failed for {}: {}", source_name, path.display(), e);
-                    continue;
-                }
-            };
-            let mtime = match metadata.modified() {
-                Ok(t) => t
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .map(|d| d.as_secs_f64())
-                    .unwrap_or(0.0),
-                Err(_) => 0.0,
-            };
-            let size = metadata.len();
-
-            // Check tracker — skip if file is unchanged
-            let tracked = get_file_tracker(con, path);
-            let mut last_entry_ts: Option<String> = None;
-
-            match tracked {
-                Some(ft) if ft.mtime == mtime && ft.size == size => {
-                    // File is identical to last scan — skip entirely
-                    files_skipped += 1;
-                    continue;
-                }
-                Some(ft) if size >= ft.size => {
-                    // File was appended — read only new bytes from tracked position
-                    let mut file = match fs::File::open(path) {
-                        Ok(f) => f,
-                        Err(e) => {
-                            warn!("ETL '{}': open failed for {}: {}", source_name, path.display(), e);
-                            continue;
-                        }
-                    };
-                    if let Err(e) = file.seek(SeekFrom::Start(ft.size)) {
-                        warn!("ETL '{}': seek failed for {}: {}", source_name, path.display(), e);
-                        continue;
-                    }
-                    let mut new_bytes = Vec::new();
-                    if let Err(e) = file.read_to_end(&mut new_bytes) {
-                        warn!("ETL '{}': read failed for {}: {}", source_name, path.display(), e);
-                        continue;
-                    }
-                    // Convert to string (new bytes only)
-                    let new_content = match String::from_utf8(new_bytes) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            warn!("ETL '{}': utf8 error for {}: {}", source_name, path.display(), e);
-                            continue;
-                        }
-                    };
-                    if !new_content.is_empty() {
-                        let new_entries = parser.parse_content(path, &new_content);
-                        batch.extend(new_entries);
-                    }
-                    // Use last tracked entry timestamp if available
-                    last_entry_ts = ft.last_entry_ts;
-                    files_read += 1;
-                }
-                _ => {
-                    // Cold start or file was truncated/rotated — full read
-                    let content = match fs::read_to_string(path) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            warn!("ETL '{}': read failed for {}: {}", source_name, path.display(), e);
-                            continue;
-                        }
-                    };
-                    let new_entries = parser.parse_content(path, &content);
-                    batch.extend(new_entries);
-                    files_read += 1;
-                }
-            }
-
-            // Update tracker with current mtime/size
-            if let Err(e) = update_file_tracker(con, path, mtime, size, last_entry_ts) {
-                warn!("ETL '{}': tracker update failed for {}: {}", source_name, path.display(), e);
-            }
-        }
-
-        if batch.is_empty() { continue; }
-
-        fill_costs(&mut batch);
-        total += appender_insert(con, &batch)?;
+    for chunk in all_files.chunks(batch_files) {
+        total += ingest_files(con, kind, chunk)?;
     }
 
-    info!("ETL '{}': {} entries from {} files ({} skipped)",
-        source_name, total, files_read, files_skipped);
+    info!("ETL '{}': {} entries from {} files", kind.name(), total, all_files.len());
     Ok(total)
 }
 
-/// Bulk-insert entries using batch INSERT OR IGNORE with multi-row VALUES.
-///
-/// Batches of BATCH_SIZE rows per statement to avoid the per-row statement
-/// overhead that made cold-start ETL take minutes over 700+ files.
-/// Wrapped in a single transaction for atomicity and speed.
-///
-/// DuckDB's Appender API does NOT support INSERT OR IGNORE (BUG-004),
-/// so we use multi-row VALUES which is the next-best option.
-const BATCH_SIZE: usize = 50;  // 50 rows × 16 cols = 800 params per batch
-
-fn appender_insert(con: &mut Connection, entries: &[NormalizedEntry]) -> Result<usize, String> {
-    if entries.is_empty() {
+/// Build the bronze→silver SQL for a batch of files and execute it.
+/// Returns the number of rows inserted (INSERT OR IGNORE skips duplicates).
+fn ingest_files(con: &Connection, kind: SourceKind, paths: &[PathBuf]) -> Result<usize, String> {
+    if paths.is_empty() {
         return Ok(0);
     }
+    let paths_array = paths_to_sql_array(paths);
+    let sql = match kind {
+        SourceKind::Claude => claude_silver_sql(&paths_array),
+        SourceKind::Pi => pi_silver_sql(&paths_array),
+    };
 
-    let tx = con.transaction().map_err(|e| format!("Begin tx: {}", e))?;
-    let col_count = 16;
-    let mut inserted = 0usize;
-
-    for chunk in entries.chunks(BATCH_SIZE) {
-        // Build multi-row VALUES clause: (?1,?2,...,?16), (?17,?18,...), ...
-        let rows: Vec<String> = chunk.iter().enumerate().map(|(i, _)| {
-            let base = i * col_count;
-            let nums: Vec<String> = (1..=col_count).map(|j| {
-                if j == 3 { format!("?{}::TIMESTAMP", base + j) }
-                else { format!("?{}", base + j) }
-            }).collect();
-            format!("({})", nums.join(", "))
-        }).collect();
-
-        let sql = format!(
-            "INSERT OR IGNORE INTO entries \
-             (source, session_id, ts, model, provider, role, \
-              input_tokens, output_tokens, \
-              cache_creation_input_tokens, cache_read_input_tokens, \
-              input_cost, output_cost, cache_write_cost, cache_read_cost, \
-              total_cost, file_path) \
-             VALUES {}",
-            rows.join(", ")
-        );
-
-        let mut params: Vec<Box<dyn duckdb::types::ToSql>> = Vec::with_capacity(chunk.len() * col_count);
-        for entry in chunk {
-            let ts = entry.ts.format("%Y-%m-%d %H:%M:%S").to_string();
-            params.push(Box::new(entry.source.clone()));
-            params.push(Box::new(entry.session_id.clone()));
-            params.push(Box::new(ts));
-            params.push(Box::new(entry.model.clone()));
-            params.push(Box::new(entry.provider.clone()));
-            params.push(Box::new(entry.role.clone()));
-            params.push(Box::new(entry.input_tokens as i64));
-            params.push(Box::new(entry.output_tokens as i64));
-            params.push(Box::new(entry.cache_creation_input_tokens as i64));
-            params.push(Box::new(entry.cache_read_input_tokens as i64));
-            params.push(Box::new(entry.input_cost));
-            params.push(Box::new(entry.output_cost));
-            params.push(Box::new(entry.cache_write_cost));
-            params.push(Box::new(entry.cache_read_cost));
-            params.push(Box::new(entry.total_cost));
-            params.push(Box::new(entry.file_path.clone()));
-        }
-
-        let param_refs: Vec<&dyn duckdb::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        match tx.execute(&sql, param_refs.as_slice()) {
-            Ok(n) => inserted += n as usize,
-            Err(e) => {
-                log::warn!("Batch insert error: {}", e);
-            }
-        }
+    if kind == SourceKind::Pi {
+        // Carry-forward relies on file line order from the scan.
+        let _ = con.execute_batch("SET preserve_insertion_order=true;");
+    }
+    let result = con.execute(&sql, []);
+    if kind == SourceKind::Pi {
+        let _ = con.execute_batch("SET preserve_insertion_order=false;");
     }
 
-    tx.commit().map_err(|e| format!("Commit tx: {}", e))?;
-    Ok(inserted)
+    match result {
+        Ok(n) => Ok(n),
+        Err(e) => { warn!("ETL '{}': ingest insert: {}", kind.name(), e); Ok(0) }
+    }
+}
+
+/// Render a slice of paths as a DuckDB array literal: `'a/b.jsonl','c/d.jsonl'`.
+/// Backslashes are normalized to `/` (DuckDB accepts `/` on Windows and the
+/// `entries.file_path` key is stored forward-slash for cross-platform stability).
+/// Single quotes are doubled per SQL string-literal escaping.
+fn paths_to_sql_array(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|p| {
+            let s = p.to_string_lossy().replace('\\', "/").replace('\'', "''");
+            format!("'{}'", s)
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Claude silver extraction. Assistant messages carry usage; cost is flat-priced
+/// in SQL. The `input>0 OR output>0` guard replicates `fill_costs` exactly (incl.
+/// its cache-only-row zero-cost gap — a latent bug kept for parity; see plan).
+fn claude_silver_sql(paths_array: &str) -> String {
+    let ip = crate::pricing::INPUT_PRICE;
+    let op = crate::pricing::OUTPUT_PRICE;
+    let cwp = crate::pricing::CACHE_WRITE_PRICE;
+    let crp = crate::pricing::CACHE_READ_PRICE;
+    format!(
+        "INSERT OR IGNORE INTO entries
+           (source, session_id, ts, model, provider, role,
+            input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
+            input_cost, output_cost, cache_write_cost, cache_read_cost, total_cost, file_path)
+         WITH bronze AS (
+           SELECT json AS j, replace(filename, '\\', '/') AS file_path
+           FROM read_ndjson_objects([{paths}],
+                  filename = true, ignore_errors = true, maximum_object_size = {mos})
+         ),
+         ex AS (
+           SELECT
+             COALESCE(json_extract_string(j, '$.sessionId'),
+                      regexp_extract(file_path, '([^/]+)\\.jsonl$', 1)) AS session_id,
+             TRY_CAST(json_extract_string(j, '$.timestamp') AS TIMESTAMP) AS ts,
+             json_extract_string(j, '$.message.model') AS model,
+             COALESCE(TRY_CAST(json_extract_string(j, '$.message.usage.input_tokens')  AS BIGINT), 0) AS input_tokens,
+             COALESCE(TRY_CAST(json_extract_string(j, '$.message.usage.output_tokens') AS BIGINT), 0) AS output_tokens,
+             COALESCE(TRY_CAST(json_extract_string(j, '$.message.usage.cache_creation_input_tokens') AS BIGINT), 0) AS cache_creation_input_tokens,
+             COALESCE(TRY_CAST(json_extract_string(j, '$.message.usage.cache_read_input_tokens')     AS BIGINT), 0) AS cache_read_input_tokens,
+             file_path
+           FROM bronze
+           WHERE json_extract_string(j, '$.type') = 'assistant'
+             AND json_extract(j, '$.message.usage') IS NOT NULL
+         )
+         SELECT
+           'claude', session_id, ts, model, 'anthropic', 'assistant',
+           input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
+           CASE WHEN input_tokens > 0 OR output_tokens > 0 THEN input_tokens / 1e6 * {ip} ELSE 0 END,
+           CASE WHEN input_tokens > 0 OR output_tokens > 0 THEN output_tokens / 1e6 * {op} ELSE 0 END,
+           CASE WHEN input_tokens > 0 OR output_tokens > 0 THEN cache_creation_input_tokens / 1e6 * {cwp} ELSE 0 END,
+           CASE WHEN input_tokens > 0 OR output_tokens > 0 THEN cache_read_input_tokens / 1e6 * {crp} ELSE 0 END,
+           CASE WHEN input_tokens > 0 OR output_tokens > 0
+                THEN input_tokens / 1e6 * {ip} + output_tokens / 1e6 * {op}
+                   + cache_creation_input_tokens / 1e6 * {cwp} + cache_read_input_tokens / 1e6 * {crp}
+                ELSE 0 END,
+           file_path
+         FROM ex
+         WHERE ts IS NOT NULL",
+        paths = paths_array, mos = MAX_OBJECT_SIZE, ip = ip, op = op, cwp = cwp, crp = crp,
+    )
+}
+
+/// Pi silver extraction. Pi uses camelCase token fields and carries its own cost
+/// nested under `usage.cost`. `model_change` events set the active model/provider,
+/// carried forward to subsequent assistant rows via a window LAST_VALUE. Flat
+/// pricing is applied only when Pi supplied no total cost (matches `fill_costs`).
+fn pi_silver_sql(paths_array: &str) -> String {
+    let ip = crate::pricing::INPUT_PRICE;
+    let op = crate::pricing::OUTPUT_PRICE;
+    let cwp = crate::pricing::CACHE_WRITE_PRICE;
+    let crp = crate::pricing::CACHE_READ_PRICE;
+    format!(
+        "INSERT OR IGNORE INTO entries
+           (source, session_id, ts, model, provider, role,
+            input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
+            input_cost, output_cost, cache_write_cost, cache_read_cost, total_cost, file_path)
+         WITH bronze AS (
+           SELECT json AS j, replace(filename, '\\', '/') AS file_path,
+                  row_number() OVER () AS rn
+           FROM read_ndjson_objects([{paths}],
+                  filename = true, ignore_errors = true, maximum_object_size = {mos})
+         ),
+         carried AS (
+           SELECT *,
+             LAST_VALUE(CASE WHEN json_extract_string(j, '$.type') = 'model_change'
+                             THEN json_extract_string(j, '$.modelId') END IGNORE NULLS)
+               OVER (ORDER BY rn ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS carried_model,
+             LAST_VALUE(CASE WHEN json_extract_string(j, '$.type') = 'model_change'
+                             THEN json_extract_string(j, '$.provider') END IGNORE NULLS)
+               OVER (ORDER BY rn ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS carried_provider
+           FROM bronze
+         ),
+         ex AS (
+           SELECT
+             split_part(regexp_extract(file_path, '([^/]+)\\.jsonl$', 1), '_', 2) AS session_id,
+             COALESCE(
+               CASE WHEN TRY_CAST(json_extract_string(j, '$.message.timestamp') AS BIGINT) IS NOT NULL
+                    THEN to_timestamp(TRY_CAST(json_extract_string(j, '$.message.timestamp') AS BIGINT) / 1000.0) AT TIME ZONE 'UTC'
+               END,
+               TRY_CAST(json_extract_string(j, '$.timestamp') AS TIMESTAMP)
+             ) AS ts,
+             COALESCE(json_extract_string(j, '$.message.model'), carried_model) AS model,
+             COALESCE(json_extract_string(j, '$.message.provider'), carried_provider) AS provider,
+             COALESCE(TRY_CAST(json_extract_string(j, '$.message.usage.input')      AS BIGINT), 0) AS input_tokens,
+             COALESCE(TRY_CAST(json_extract_string(j, '$.message.usage.output')     AS BIGINT), 0) AS output_tokens,
+             COALESCE(TRY_CAST(json_extract_string(j, '$.message.usage.cacheWrite') AS BIGINT), 0) AS cache_creation_input_tokens,
+             COALESCE(TRY_CAST(json_extract_string(j, '$.message.usage.cacheRead')  AS BIGINT), 0) AS cache_read_input_tokens,
+             COALESCE(TRY_CAST(json_extract_string(j, '$.message.usage.cost.input')      AS DOUBLE), 0) AS p_input_cost,
+             COALESCE(TRY_CAST(json_extract_string(j, '$.message.usage.cost.output')     AS DOUBLE), 0) AS p_output_cost,
+             COALESCE(TRY_CAST(json_extract_string(j, '$.message.usage.cost.cacheWrite') AS DOUBLE), 0) AS p_cache_write_cost,
+             COALESCE(TRY_CAST(json_extract_string(j, '$.message.usage.cost.cacheRead')  AS DOUBLE), 0) AS p_cache_read_cost,
+             COALESCE(TRY_CAST(json_extract_string(j, '$.message.usage.cost.total')      AS DOUBLE), 0) AS p_total_cost,
+             file_path
+           FROM carried
+           WHERE json_extract_string(j, '$.type') = 'message'
+             AND json_extract_string(j, '$.message.role') = 'assistant'
+             AND json_extract(j, '$.message.usage') IS NOT NULL
+         )
+         SELECT
+           'pi', session_id, ts, model, provider, 'assistant',
+           input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
+           CASE WHEN p_total_cost = 0 AND (input_tokens > 0 OR output_tokens > 0)
+                THEN input_tokens / 1e6 * {ip} ELSE p_input_cost END,
+           CASE WHEN p_total_cost = 0 AND (input_tokens > 0 OR output_tokens > 0)
+                THEN output_tokens / 1e6 * {op} ELSE p_output_cost END,
+           CASE WHEN p_total_cost = 0 AND (input_tokens > 0 OR output_tokens > 0)
+                THEN cache_creation_input_tokens / 1e6 * {cwp} ELSE p_cache_write_cost END,
+           CASE WHEN p_total_cost = 0 AND (input_tokens > 0 OR output_tokens > 0)
+                THEN cache_read_input_tokens / 1e6 * {crp} ELSE p_cache_read_cost END,
+           CASE WHEN p_total_cost = 0 AND (input_tokens > 0 OR output_tokens > 0)
+                THEN input_tokens / 1e6 * {ip} + output_tokens / 1e6 * {op}
+                   + cache_creation_input_tokens / 1e6 * {cwp} + cache_read_input_tokens / 1e6 * {crp}
+                ELSE p_total_cost END,
+           file_path
+         FROM ex
+         WHERE ts IS NOT NULL",
+        paths = paths_array, mos = MAX_OBJECT_SIZE, ip = ip, op = op, cwp = cwp, crp = crp,
+    )
 }
 
 impl UsageStore {
@@ -892,117 +861,138 @@ impl UsageStore {
     }
 }
 
-/// Fill missing cost fields using flat per-token pricing.
-/// Entries that already carry costs (e.g. from Pi) are left untouched.
-fn fill_costs(entries: &mut [NormalizedEntry]) {
-    let input_price = crate::pricing::INPUT_PRICE;
-    let output_price = crate::pricing::OUTPUT_PRICE;
-    let cache_write_price = crate::pricing::CACHE_WRITE_PRICE;
-    let cache_read_price = crate::pricing::CACHE_READ_PRICE;
-
-    for e in entries.iter_mut() {
-        if e.total_cost == 0.0 && (e.input_tokens > 0 || e.output_tokens > 0) {
-            e.input_cost = e.input_tokens as f64 / 1_000_000.0 * input_price;
-            e.output_cost = e.output_tokens as f64 / 1_000_000.0 * output_price;
-            e.cache_write_cost = e.cache_creation_input_tokens as f64 / 1_000_000.0 * cache_write_price;
-            e.cache_read_cost = e.cache_read_input_tokens as f64 / 1_000_000.0 * cache_read_price;
-            e.total_cost = e.input_cost + e.output_cost + e.cache_write_cost + e.cache_read_cost;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
+    use crate::pricing::{CACHE_READ_PRICE, CACHE_WRITE_PRICE, INPUT_PRICE, OUTPUT_PRICE};
+
+    const ENTRIES_DDL: &str = "CREATE TABLE entries (
+        source TEXT NOT NULL, session_id TEXT NOT NULL, ts TIMESTAMP NOT NULL,
+        model TEXT, provider TEXT, role TEXT,
+        input_tokens BIGINT NOT NULL DEFAULT 0, output_tokens BIGINT NOT NULL DEFAULT 0,
+        cache_creation_input_tokens BIGINT NOT NULL DEFAULT 0,
+        cache_read_input_tokens BIGINT NOT NULL DEFAULT 0,
+        input_cost DOUBLE NOT NULL DEFAULT 0.0, output_cost DOUBLE NOT NULL DEFAULT 0.0,
+        cache_write_cost DOUBLE NOT NULL DEFAULT 0.0, cache_read_cost DOUBLE NOT NULL DEFAULT 0.0,
+        total_cost DOUBLE NOT NULL DEFAULT 0.0, file_path TEXT NOT NULL,
+        UNIQUE(source, session_id, ts, file_path)
+    );";
+
+    fn test_con() -> Connection {
+        let con = Connection::open_in_memory().unwrap();
+        con.execute_batch(ENTRIES_DDL).unwrap();
+        con
+    }
+
+    /// Write a fixture JSONL file under a unique temp dir; returns its path.
+    fn write_fixture(name: &str, content: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "locdock_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    fn approx(a: f64, b: f64) {
+        assert!((a - b).abs() < 1e-9, "expected {b}, got {a}");
+    }
 
     #[test]
-    fn test_insert_or_ignore_duplicates() {
-        let mut con = Connection::open_in_memory().unwrap();
-        con.execute_batch(
-            "CREATE TABLE entries (
-                source TEXT NOT NULL,
-                session_id TEXT NOT NULL,
-                ts TIMESTAMP NOT NULL,
-                model TEXT,
-                provider TEXT,
-                role TEXT,
-                input_tokens BIGINT NOT NULL DEFAULT 0,
-                output_tokens BIGINT NOT NULL DEFAULT 0,
-                cache_creation_input_tokens BIGINT NOT NULL DEFAULT 0,
-                cache_read_input_tokens BIGINT NOT NULL DEFAULT 0,
-                input_cost DOUBLE NOT NULL DEFAULT 0.0,
-                output_cost DOUBLE NOT NULL DEFAULT 0.0,
-                cache_write_cost DOUBLE NOT NULL DEFAULT 0.0,
-                cache_read_cost DOUBLE NOT NULL DEFAULT 0.0,
-                total_cost DOUBLE NOT NULL DEFAULT 0.0,
-                file_path TEXT NOT NULL,
-                UNIQUE(source, session_id, ts, file_path)
-            );"
-        )
-        .unwrap();
+    fn claude_silver_parity_and_idempotency() {
+        let con = test_con();
+        // 2 valid assistant rows (one with io tokens, one cache-only), plus rows that
+        // must be skipped: user type, assistant w/o usage, and a malformed line.
+        let content = "\
+{\"type\":\"assistant\",\"sessionId\":\"s1\",\"timestamp\":\"2024-01-02T03:04:05.000Z\",\"message\":{\"model\":\"claude-x\",\"usage\":{\"input_tokens\":100,\"output_tokens\":50,\"cache_creation_input_tokens\":10,\"cache_read_input_tokens\":5}}}
+{\"type\":\"user\",\"sessionId\":\"s1\",\"timestamp\":\"2024-01-02T03:04:06.000Z\",\"message\":{\"role\":\"user\"}}
+{\"type\":\"assistant\",\"sessionId\":\"s1\",\"timestamp\":\"2024-01-02T03:04:07.000Z\",\"message\":{\"model\":\"claude-x\"}}
+{\"type\":\"assistant\",\"sessionId\":\"s1\",\"timestamp\":\"2024-01-02T03:04:08.000Z\",\"message\":{\"model\":\"claude-x\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"cache_read_input_tokens\":1000}}}
+{not valid json
+";
+        let path = write_fixture("claude.jsonl", content);
 
-        let now = Utc::now();
-        let entry = NormalizedEntry {
-            source: "test".to_string(),
-            session_id: "sess-1".to_string(),
-            ts: now,
-            model: None,
-            provider: None,
-            role: None,
-            input_tokens: 100,
-            output_tokens: 50,
-            cache_creation_input_tokens: 10,
-            cache_read_input_tokens: 5,
-            input_cost: 0.001,
-            output_cost: 0.002,
-            cache_write_cost: 0.0005,
-            cache_read_cost: 0.0001,
-            total_cost: 0.0036,
-            file_path: "test.jsonl".to_string(),
+        let n = ingest_files(&con, SourceKind::Claude, std::slice::from_ref(&path)).unwrap();
+        assert_eq!(n, 2, "only the 2 assistant-with-usage rows ingest");
+
+        let count: i64 = con.query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 2);
+
+        // Token sums
+        let (it, ot, cc, cr): (i64, i64, i64, i64) = con
+            .query_row(
+                "SELECT SUM(input_tokens), SUM(output_tokens), SUM(cache_creation_input_tokens), SUM(cache_read_input_tokens) FROM entries",
+                [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            ).unwrap();
+        assert_eq!((it, ot, cc, cr), (100, 50, 10, 1005));
+
+        // io row: flat-priced. cache-only row: zero cost (fill_costs guard parity).
+        let io_total: f64 = con
+            .query_row("SELECT total_cost FROM entries WHERE input_tokens = 100", [], |r| r.get(0)).unwrap();
+        approx(io_total,
+            100.0 / 1e6 * INPUT_PRICE + 50.0 / 1e6 * OUTPUT_PRICE
+            + 10.0 / 1e6 * CACHE_WRITE_PRICE + 5.0 / 1e6 * CACHE_READ_PRICE);
+        let cacheonly_total: f64 = con
+            .query_row("SELECT total_cost FROM entries WHERE cache_read_input_tokens = 1000", [], |r| r.get(0)).unwrap();
+        approx(cacheonly_total, 0.0);
+
+        // session_id, model, provider, role, file_path normalization
+        let (sid, model, prov, role): (String, String, String, String) = con
+            .query_row("SELECT session_id, model, provider, role FROM entries WHERE input_tokens = 100",
+                [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap();
+        assert_eq!((sid.as_str(), model.as_str(), prov.as_str(), role.as_str()),
+                   ("s1", "claude-x", "anthropic", "assistant"));
+
+        // Idempotency: re-ingest inserts nothing.
+        let n2 = ingest_files(&con, SourceKind::Claude, std::slice::from_ref(&path)).unwrap();
+        assert_eq!(n2, 0, "re-ingest is a no-op");
+        let count2: i64 = con.query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0)).unwrap();
+        assert_eq!(count2, 2);
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn pi_silver_model_carryforward_and_cost() {
+        let con = test_con();
+        // model_change(alpha) → assistant (no model, no cost → carries alpha, flat-priced)
+        // model_change(beta)  → assistant (explicit model gamma, parsed cost 0.5 → kept)
+        // a user message is skipped.
+        let content = "\
+{\"type\":\"model_change\",\"modelId\":\"alpha\",\"provider\":\"prov1\"}
+{\"type\":\"message\",\"timestamp\":\"2023-11-14T00:00:00Z\",\"message\":{\"role\":\"assistant\",\"timestamp\":1700000000000,\"usage\":{\"input\":10,\"output\":20}}}
+{\"type\":\"model_change\",\"modelId\":\"beta\",\"provider\":\"prov2\"}
+{\"type\":\"message\",\"message\":{\"role\":\"user\",\"timestamp\":1700000001000,\"text\":\"hi\"}}
+{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"model\":\"gamma\",\"timestamp\":1700000002000,\"usage\":{\"input\":5,\"output\":5,\"cost\":{\"total\":0.5}}}}
+";
+        let path = write_fixture("agent_sessABC_2023.jsonl", content);
+
+        let n = ingest_files(&con, SourceKind::Pi, std::slice::from_ref(&path)).unwrap();
+        assert_eq!(n, 2, "two assistant messages ingest");
+
+        // session_id derived from filename: split on '_' → element 2.
+        let sid: String = con.query_row("SELECT DISTINCT session_id FROM entries", [], |r| r.get(0)).unwrap();
+        assert_eq!(sid, "sessABC");
+
+        // model carry-forward + explicit override, ordered by ts.
+        let models: Vec<String> = {
+            let mut stmt = con.prepare("SELECT model FROM entries ORDER BY ts").unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+            rows.filter_map(|r| r.ok()).collect()
         };
+        assert_eq!(models, vec!["alpha".to_string(), "gamma".to_string()]);
 
-        // First insert should succeed
-        let n1 = appender_insert(&mut con, &[entry.clone()]).unwrap();
-        assert_eq!(n1, 1, "first insert should add 1 row");
+        // first row: no parsed cost → flat-priced. second: parsed total kept.
+        let alpha_total: f64 = con
+            .query_row("SELECT total_cost FROM entries WHERE model = 'alpha'", [], |r| r.get(0)).unwrap();
+        approx(alpha_total, 10.0 / 1e6 * INPUT_PRICE + 20.0 / 1e6 * OUTPUT_PRICE);
+        let gamma_total: f64 = con
+            .query_row("SELECT total_cost FROM entries WHERE model = 'gamma'", [], |r| r.get(0)).unwrap();
+        approx(gamma_total, 0.5);
 
-        // Second insert (identical) should be ignored by INSERT OR IGNORE
-        let n2 = appender_insert(&mut con, &[entry.clone()]).unwrap();
-        assert_eq!(n2, 0, "duplicate should be ignored");
-
-        // Different file_path should succeed (different UNIQUE key)
-        let mut diff = entry.clone();
-        diff.file_path = "other.jsonl".to_string();
-        let n3 = appender_insert(&mut con, &[diff]).unwrap();
-        assert_eq!(n3, 1, "different file_path should add 1 row");
-
-        // Batch with mix of new and duplicate entries
-        let new_entry = NormalizedEntry {
-            source: "test".to_string(),
-            session_id: "sess-2".to_string(),
-            ts: now,
-            model: None,
-            provider: None,
-            role: None,
-            input_tokens: 200,
-            output_tokens: 100,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-            input_cost: 0.0,
-            output_cost: 0.0,
-            cache_write_cost: 0.0,
-            cache_read_cost: 0.0,
-            total_cost: 0.0,
-            file_path: "batch.jsonl".to_string(),
-        };
-        let n4 = appender_insert(&mut con, &[entry.clone(), new_entry, entry.clone()]).unwrap();
-        // entry is duplicate (0), new_entry is new (1), entry is duplicate (0) = 1 total
-        assert_eq!(n4, 1, "batch with 2 dupes + 1 new should insert 1");
-
-        // Verify total row count
-        let count: i64 = con
-            .query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(count, 3, "total rows: 1 (first) + 1 (diff file_path) + 1 (batch new)");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

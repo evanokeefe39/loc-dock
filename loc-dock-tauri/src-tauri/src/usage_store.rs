@@ -3,8 +3,6 @@ use crate::types::{CostBreakdown, SourceStats, TokenTotals};
 use chrono::{DateTime, Utc};
 use duckdb::Connection;
 use log::{info, warn};
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -34,39 +32,17 @@ pub struct EtlResult {
 /// from multiple sources (Claude, Pi) via a single-phase ETL pipeline:
 ///
 /// 1. **File discovery** finds all session files within the 7-day retention window
-/// 2. **Parsing** extracts entries from JSONL files
+/// 2. **Ingest** maps source JSONL into `entries` via DuckDB SQL (no Rust parsing)
 /// 3. **INSERT OR IGNORE** with a UNIQUE constraint prevents duplicates
 ///
-/// Query results are cached via `generation` counter — re-queried only when
-/// the DB row count changes (PERF-003 + PERF-004).
+/// Queries run directly against gold (`daily_aggregates`) / silver (`entries`) — no
+/// in-memory result cache (Spike 5: serving queries are ~6 ms uncached).
 pub struct UsageStore {
     con: Connection,
     source_manager: SourceManager,
     initialized: bool,
-    /// Incremented when new rows are inserted; invalidates query cache.
-    generation: u64,
-    /// Row count at last check — used to detect new data.
+    /// Row count at last check — used to detect new data and skip aggregate refresh.
     last_row_count: u64,
-    /// Cached query results keyed by (query_type, since_str).
-    /// Valid only when stored generation matches `self.generation`.
-    cache: RefCell<QueryCache>,
-}
-
-#[derive(Default)]
-struct QueryCache {
-    token_totals: HashMap<String, (u64, TokenTotals)>,
-    cost_breakdowns: HashMap<String, (u64, CostBreakdown)>,
-    session_counts: HashMap<(String, String), (u64, (i64, i64))>,
-    source_breakdowns: HashMap<(String, String), (u64, Vec<SourceStats>)>,
-}
-
-impl QueryCache {
-    fn clear(&mut self) {
-        self.token_totals.clear();
-        self.cost_breakdowns.clear();
-        self.session_counts.clear();
-        self.source_breakdowns.clear();
-    }
 }
 
 impl UsageStore {
@@ -181,9 +157,7 @@ impl UsageStore {
             con,
             source_manager,
             initialized,
-            generation: 0,
             last_row_count: row_count as u64,
-            cache: RefCell::new(QueryCache::default()),
         }
     }
 
@@ -218,7 +192,7 @@ impl UsageStore {
         Ok(0)
     }
 
-    /// Finalize ETL: refresh aggregates, prune old data, bump generation.
+    /// Finalize ETL: refresh aggregates (only if rows grew) and prune old data.
     /// Call once after all sources have been processed.
     pub fn finalize_etl(&mut self) {
         let _ = self.con.execute(
@@ -231,9 +205,7 @@ impl UsageStore {
             .and_then(|mut stmt| stmt.query_row([], |row| row.get(0)))
             .unwrap_or(0);
         if (current_count as u64) > self.last_row_count {
-            self.generation += 1;
             self.last_row_count = current_count as u64;
-            self.cache.borrow_mut().clear();
             if let Err(e) = self.refresh_aggregates() {
                 warn!("Failed to refresh aggregates: {}", e);
             }
@@ -665,44 +637,6 @@ impl UsageStore {
         }
     }
 
-    #[allow(dead_code)] // ponytail: unused since build_all_stats switched to query_aggregates
-    pub fn query_since(&self, since_str: &str) -> TokenTotals {
-        if !self.initialized {
-            return TokenTotals::default();
-        }
-        let gen = self.generation;
-        {
-            let cache = self.cache.borrow();
-            if let Some((cg, val)) = cache.token_totals.get(since_str) {
-                if *cg == gen { return val.clone(); }
-            }
-        }
-        let key = since_str.to_string();
-        let result = match self.con.prepare(
-            "SELECT
-                COALESCE(SUM(input_tokens), 0)::BIGINT,
-                COALESCE(SUM(output_tokens), 0)::BIGINT,
-                COALESCE(SUM(cache_creation_input_tokens), 0)::BIGINT,
-                COALESCE(SUM(cache_read_input_tokens), 0)::BIGINT
-            FROM entries WHERE ts >= ?::TIMESTAMP",
-        ) {
-            Ok(mut stmt) => match stmt.query_row([since_str], |row| {
-                Ok(TokenTotals {
-                    input_tokens: row.get(0)?,
-                    output_tokens: row.get(1)?,
-                    cache_creation_input_tokens: row.get(2)?,
-                    cache_read_input_tokens: row.get(3)?,
-                })
-            }) {
-                Ok(t) => t,
-                Err(e) => { warn!("query_since failed: {}", e); TokenTotals::default() }
-            },
-            Err(e) => { warn!("query_since prepare: {}", e); TokenTotals::default() }
-        };
-        self.cache.borrow_mut().token_totals.insert(key, (gen, result.clone()));
-        result
-    }
-
     /// Cost timeline bucketed into `N_BUCKETS` equal time slices over [lo, hi)
     /// (unix epoch seconds). Replaces the Rust `bucket_cost` loop — bucketing is
     /// done in SQL (Spike 3 parity-verified). Returns exactly `N_BUCKETS` values,
@@ -724,42 +658,6 @@ impl UsageStore {
             Err(e) => warn!("Cost buckets prepare: {}", e),
         }
         out
-    }
-
-    #[allow(dead_code)] // ponytail: unused since build_all_stats switched to query_aggregates
-    pub fn query_cost_breakdown(&self, since_str: &str) -> CostBreakdown {
-        if !self.initialized { return CostBreakdown::default(); }
-        let gen = self.generation;
-        {
-            let cache = self.cache.borrow();
-            if let Some((cg, val)) = cache.cost_breakdowns.get(since_str) {
-                if *cg == gen { return val.clone(); }
-            }
-        }
-        let key = since_str.to_string();
-        let result = match self.con.prepare(
-            "SELECT
-                COALESCE(SUM(input_cost), 0),
-                COALESCE(SUM(output_cost), 0),
-                COALESCE(SUM(cache_write_cost), 0),
-                COALESCE(SUM(cache_read_cost), 0)
-            FROM entries WHERE ts >= ?::TIMESTAMP",
-        ) {
-            Ok(mut stmt) => match stmt.query_row([since_str], |row| {
-                Ok(CostBreakdown {
-                    input: row.get(0)?,
-                    output: row.get(1)?,
-                    cache_write: row.get(2)?,
-                    cache_read: row.get(3)?,
-                })
-            }) {
-                Ok(cb) => cb,
-                Err(e) => { warn!("Cost breakdown: {}", e); CostBreakdown::default() }
-            },
-            Err(e) => { warn!("Cost breakdown prepare: {}", e); CostBreakdown::default() }
-        };
-        self.cache.borrow_mut().cost_breakdowns.insert(key, (gen, result.clone()));
-        result
     }
 
     /// Token timeline bucketed into `N_BUCKETS` slices over [lo, hi) (unix epoch
@@ -791,17 +689,12 @@ impl UsageStore {
         out
     }
 
+    /// Distinct session counts (total since `since_str`, active since `active_str`).
+    /// Queries `entries` directly — distinct counts are non-additive so they cannot
+    /// come from `daily_aggregates` over multi-day ranges (Spike 5). Uncached (~6 ms).
     pub fn count_sessions(&self, since_str: &str, active_str: &str) -> (i64, i64) {
         if !self.initialized { return (0, 0); }
-        let gen = self.generation;
-        let cache_key = (since_str.to_string(), active_str.to_string());
-        {
-            let cache = self.cache.borrow();
-            if let Some((cg, val)) = cache.session_counts.get(&cache_key) {
-                if *cg == gen { return *val; }
-            }
-        }
-        let result = match self.con.prepare(
+        match self.con.prepare(
             "SELECT
                 COUNT(DISTINCT session_id) FILTER (WHERE ts >= ?::TIMESTAMP),
                 COUNT(DISTINCT session_id) FILTER (WHERE ts >= ?::TIMESTAMP)
@@ -814,56 +707,7 @@ impl UsageStore {
                 Err(e) => { warn!("Session count: {}", e); (0, 0) }
             },
             Err(e) => { warn!("Session count prepare: {}", e); (0, 0) }
-        };
-        self.cache.borrow_mut().session_counts.insert(cache_key, (gen, result));
-        result
-    }
-
-    #[allow(dead_code)] // ponytail: unused since build_all_stats switched to query_aggregates
-    pub fn query_source_breakdown(&self, since_str: &str, active_str: &str) -> Vec<SourceStats> {
-        if !self.initialized { return Vec::new(); }
-        let gen = self.generation;
-        let cache_key = (since_str.to_string(), active_str.to_string());
-        {
-            let cache = self.cache.borrow();
-            if let Some((cg, val)) = cache.source_breakdowns.get(&cache_key) {
-                if *cg == gen { return val.clone(); }
-            }
         }
-        let result = match self.con.prepare(
-            "SELECT
-                source,
-                COUNT(DISTINCT session_id) FILTER (WHERE ts >= ?1::TIMESTAMP),
-                COUNT(DISTINCT session_id) FILTER (WHERE ts >= ?2::TIMESTAMP),
-                COALESCE(SUM(input_tokens), 0)::BIGINT,
-                COALESCE(SUM(output_tokens), 0)::BIGINT,
-                COALESCE(SUM(cache_creation_input_tokens), 0)::BIGINT,
-                COALESCE(SUM(cache_read_input_tokens), 0)::BIGINT,
-                COALESCE(SUM(total_cost), 0)
-            FROM entries WHERE ts >= ?1::TIMESTAMP
-            GROUP BY source ORDER BY source",
-        ) {
-            Ok(mut stmt) => match stmt.query_map([since_str, active_str], |row| {
-                Ok(SourceStats {
-                    source: row.get(0)?,
-                    sessions_total: row.get(1)?,
-                    sessions_active: row.get(2)?,
-                    tokens: TokenTotals {
-                        input_tokens: row.get(3)?,
-                        output_tokens: row.get(4)?,
-                        cache_creation_input_tokens: row.get(5)?,
-                        cache_read_input_tokens: row.get(6)?,
-                    },
-                    cost_total: row.get(7)?,
-                })
-            }) {
-                Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
-                Err(e) => { warn!("Source breakdown: {}", e); Vec::new() }
-            },
-            Err(e) => { warn!("Source breakdown prepare: {}", e); Vec::new() }
-        };
-        self.cache.borrow_mut().source_breakdowns.insert(cache_key, (gen, result.clone()));
-        result
     }
 }
 

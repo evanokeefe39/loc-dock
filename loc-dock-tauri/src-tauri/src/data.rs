@@ -1,12 +1,12 @@
 use crate::config::Config;
 use crate::git::{self, GitPoint};
-use crate::git_cache;
 use crate::job_log;
 use crate::source_adapter::{GlobFileDiscoverer, SourceKind, SourceManager};
 use crate::task_queue::TaskQueue;
 use crate::time_utils;
 use crate::types::*;
 use crate::usage_store::UsageStore;
+use duckdb::Connection;
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 use chrono_tz::Tz;
 use log::{info, warn};
@@ -17,22 +17,41 @@ const N_BUCKETS: usize = 48;
 
 pub type SharedStats = Arc<RwLock<AllStats>>;
 
-pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) {
+pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: SharedStats, con: Connection) {
     std::thread::spawn(move || {
+        // Read config once — clones are cheap, avoids holding the lock.
+        let (projects_dir, pi_sessions_dir, usage_cache_dir, pricing, config_dir,
+             tz, day_start_hour, week_start_day, repos_dir,
+             session_idle_timeout, refresh_interval) = {
+            let cfg = config.read().unwrap();
+            (
+                cfg.projects_dir.clone(),
+                cfg.pi_sessions_dir.clone(),
+                cfg.settings.usage_cache_dir.clone(),
+                cfg.pricing.clone(),
+                cfg.config_dir.clone(),
+                cfg.settings.timezone.parse::<Tz>().unwrap_or(chrono_tz::UTC),
+                cfg.settings.day_start_hour,
+                cfg.settings.week_start_day,
+                cfg.settings.repos_dir.clone(),
+                cfg.settings.session_idle_timeout,
+                cfg.settings.refresh_interval,
+            )
+        };
+
         let claude_discoverer = GlobFileDiscoverer::new(
-            config.projects_dir.clone(),
+            projects_dir,
             vec!["subagents".to_string()],
         );
         let pi_discoverer = GlobFileDiscoverer::new(
-            config.pi_sessions_dir.clone(),
+            pi_sessions_dir,
             vec![],
         );
         let source_manager = SourceManager::with_discoverers(vec![
             (Box::new(claude_discoverer), SourceKind::Claude),
             (Box::new(pi_discoverer), SourceKind::Pi),
         ]);
-        let mut store = UsageStore::new(source_manager, &config.settings.usage_cache_dir, config.pricing.clone(), &config.config_dir);
-        let tz: Tz = config.settings.timezone.parse().unwrap_or(chrono_tz::UTC);
+        let mut store = UsageStore::new(source_manager, &usage_cache_dir, pricing, &config_dir, con);
         let queue = app.state::<TaskQueue>();
 
         // ── Pre-fill SharedStats from daily_aggregates (<50ms first paint) ──
@@ -40,8 +59,8 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
         // Month/year are kept as Default (frontend still renders but shows 0s).
         {
             let now_local = Utc::now().with_timezone(&tz);
-            let day_s = time_utils::day_start(&now_local, config.settings.day_start_hour);
-            let week_s = time_utils::week_start(&now_local, config.settings.day_start_hour, config.settings.week_start_day);
+            let day_s = time_utils::day_start(&now_local, day_start_hour);
+            let week_s = time_utils::week_start(&now_local, day_start_hour, week_start_day);
 
             let day_date = day_s.format("%Y-%m-%d").to_string();
             let week_date = week_s.format("%Y-%m-%d").to_string();
@@ -88,45 +107,22 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
 
             let now_local = Utc::now().with_timezone(&tz);
 
-            let week_s = time_utils::week_start(&now_local, config.settings.day_start_hour, config.settings.week_start_day);
-            let day_s = time_utils::day_start(&now_local, config.settings.day_start_hour);
+            let week_s = time_utils::week_start(&now_local, day_start_hour, week_start_day);
+            let day_s = time_utils::day_start(&now_local, day_start_hour);
 
             // Git scan from week start (ponytail: year range cut — re-add as optional manual trigger)
             let since_iso = week_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
 
-            // Run git scan and ETL in parallel — but with a timeout so a stuck git
-            // process doesn't block the cycle forever.
-            let repos_dir = config.settings.repos_dir.clone();
-            let git_cache_dir = config.settings.git_cache_dir.clone();
-            let since_clone = since_iso.clone();
-            let git_handle = std::thread::spawn(move || {
-                let t = std::time::Instant::now();
-                let cache = git_cache::GitCache::new(&git_cache_dir);
-                let result = git::get_git_loc_timeline(&repos_dir, &since_clone, &cache);
-                (result, t.elapsed())
-            });
-
-            // Join git thread with 60s timeout — run_etl hasn't started yet.
-            // No parallel benefit here since we need git_points for the first emit,
-            // but the timeout prevents hanging forever.
-            const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-            let git_start_wait = std::time::Instant::now();
-            let (git_points, git_ms) = loop {
-                if git_handle.is_finished() {
-                    let (pts, dur) = git_handle.join().unwrap_or_else(|_| (Vec::new(), std::time::Duration::ZERO));
-                    break (pts, dur.as_millis());
-                }
-                if git_start_wait.elapsed() >= GIT_TIMEOUT {
-                    warn!("Git scan timed out after {}s — proceeding without LOC data", GIT_TIMEOUT.as_secs());
-                    break (Vec::new(), git_start_wait.elapsed().as_millis());
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            };
+            // Run git scan directly (git log on all repos, stateless).
+            // No caching needed — repos with no matching commits return in ~2ms.
+            let git_start = std::time::Instant::now();
+            let git_points = git::get_git_loc_timeline(&repos_dir, &since_iso);
+            let git_ms = git_start.elapsed().as_millis();
 
             // Time window strings for day+week
             let week_utc_str = week_s.with_timezone(&Utc).format("%Y-%m-%d %H:%M:%S").to_string();
             let day_utc_str = day_s.with_timezone(&Utc).format("%Y-%m-%d %H:%M:%S").to_string();
-            let active_str = (Utc::now() - Duration::seconds(config.settings.session_idle_timeout as i64))
+            let active_str = (Utc::now() - Duration::seconds(session_idle_timeout as i64))
                 .format("%Y-%m-%d %H:%M:%S")
                 .to_string();
 
@@ -138,7 +134,7 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
                         &git_points, &store,
                         &week_s, &day_s, &now_local,
                         &week_utc_str, &day_utc_str, &active_str,
-                        config.settings.day_start_hour,
+                        day_start_hour,
                     );
                     if let Ok(mut locked) = stats.write() {
                         *locked = s.clone();
@@ -168,9 +164,9 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<Config>, stats: SharedStats) 
             let total_ms = cycle_start.elapsed().as_millis();
             info!("Refreshed in {}ms (git:{}ms etl:{} entries)", total_ms, git_ms, total_new);
             job_log::log_ok("data", &format!("{}ms git:{}ms", total_ms, git_ms));
-            crate::summary::perf_log_from(&config.config_dir, &format!("{}ms cycle", total_ms));
+            crate::summary::perf_log_from(&config_dir, &format!("{}ms cycle", total_ms));
 
-            std::thread::sleep(std::time::Duration::from_secs(config.settings.refresh_interval.max(10)));
+            std::thread::sleep(std::time::Duration::from_secs(refresh_interval.max(10)));
         }
     });
 }

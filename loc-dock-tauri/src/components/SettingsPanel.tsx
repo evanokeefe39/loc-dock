@@ -21,15 +21,11 @@ interface Settings {
   summary_exclude_pattern: string;
   hide_repos_without_prs: boolean;
   log_dir: string;
-  git_cache_dir: string;
   usage_cache_dir: string;
-  summary_cache_dir: string;
 }
 
 const DATA_ROWS: { key: keyof Settings; label: string; cmd: string; what: string }[] = [
-  { key: "git_cache_dir",     label: "Git cache",     cmd: "reset_git_cache",     what: "git cache" },
   { key: "usage_cache_dir",   label: "Usage cache",   cmd: "reset_usage_cache",   what: "usage cache" },
-  { key: "summary_cache_dir", label: "Summary cache",  cmd: "reset_summary_cache", what: "summary cache" },
   { key: "log_dir",           label: "Job logs",       cmd: "clear_job_logs",      what: "job logs" },
 ];
 
@@ -133,21 +129,22 @@ export function SettingsPanel({ visible, onClose }: Props) {
 
   return (
     <div className="settings-overlay">
-      <div className="settings-panel">
-        <div className="settings-header">
-          <span>Settings</span>
-          <div className="settings-header-actions">
-            <button
-              className="settings-save-btn"
-              onClick={handleSave}
-              disabled={!dirty || saving}
-              title="Save settings"
-            >
-              <Save size={12} />
-            </button>
-            <button className="settings-close" onClick={onClose}>Back</button>
-          </div>
+      <div className="settings-header">
+        <span>Settings</span>
+        <div className="settings-header-actions">
+          <button
+            className="settings-save-btn"
+            onClick={handleSave}
+            disabled={!dirty || saving}
+            title="Save settings"
+          >
+            <Save size={12} />
+          </button>
+          <button className="settings-close" onClick={onClose}>Back</button>
         </div>
+      </div>
+      <div className="settings-scroll">
+        <div className="settings-panel">
 
         {/* ── General ── */}
         <div className="settings-section-heading">General</div>
@@ -344,6 +341,7 @@ export function SettingsPanel({ visible, onClose }: Props) {
           <span>Hide repos without PRs</span>
         </label>
 
+        </div>
       </div>
     </div>
   );

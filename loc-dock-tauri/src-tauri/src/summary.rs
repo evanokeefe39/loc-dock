@@ -9,7 +9,7 @@ use log::info;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
@@ -106,10 +106,7 @@ struct SummaryStore {
 }
 
 impl SummaryStore {
-    fn new(config_dir: &Path) -> Self {
-        let _ = std::fs::create_dir_all(config_dir);
-        let db_path = config_dir.join("summaries.db");
-        let con = Connection::open(db_path).expect("failed to open summaries.db");
+    fn new(con: Connection) -> Self {
         con.execute_batch(
             "CREATE TABLE IF NOT EXISTS summaries (
                 date TEXT NOT NULL,
@@ -375,11 +372,49 @@ fn summarize_repos(
 }
 
 /// Main summary loop — runs in its own thread.
-pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>, shared: SharedSummary) {
-    if !config.settings.summary_enabled {
+pub fn spawn_summary_loop(app: AppHandle, config: Arc<RwLock<Config>>, shared: SharedSummary, con: Connection) {
+    // Read config once — clones are cheap, avoids holding the lock.
+    // The loop re-reads config on each cycle for hot-reloadable settings.
+    let cfg_arc = config.clone();
+    let read_config = move || -> (
+        bool,               // summary_enabled
+        Option<String>,     // llm_api_key
+        String,             // llm_api_endpoint
+        String,             // llm_model
+        Tz,                 // timezone
+        u32,                // day_start_hour
+        u32,                // week_start_day
+        u64,                // summary_debounce_secs
+        PathBuf,            // repos_dir
+        String,             // summary_exclude_pattern
+        u64,                // refresh_interval
+        PathBuf,            // config_dir
+    ) {
+        let cfg = cfg_arc.read().unwrap();
+        (
+            cfg.settings.summary_enabled,
+            cfg.settings.llm_api_key.clone(),
+            cfg.settings.llm_api_endpoint.clone(),
+            cfg.settings.llm_model.clone(),
+            cfg.settings.timezone.parse::<Tz>().unwrap_or(chrono_tz::UTC),
+            cfg.settings.day_start_hour,
+            cfg.settings.week_start_day,
+            cfg.settings.summary_debounce_secs,
+            cfg.settings.repos_dir.clone(),
+            cfg.settings.summary_exclude_pattern.clone(),
+            cfg.settings.refresh_interval,
+            cfg.config_dir.clone(),
+        )
+    };
+
+    let (enabled, api_key, endpoint, model, _tz, _, _, _, _, _, _, _) = read_config();
+    if !enabled {
         info!("Summary feature disabled");
         return;
     }
+
+    let api_key = api_key.or_else(|| std::env::var("DEEPSEEK_API_KEY").ok()).filter(|k| !k.is_empty());
+    let has_key = api_key.is_some();
 
     // Push every emitted snapshot into shared state too, so the get_summary command
     // (and any new listener) reads the latest without re-running git.
@@ -392,43 +427,31 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>, shared: SharedSum
         }
     };
 
-    let api_key = config
-        .settings
-        .llm_api_key
-        .clone()
-        .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok())
-        .filter(|k| !k.is_empty());
-
-    let endpoint = config.settings.llm_api_endpoint.clone();
-    let model = config.settings.llm_model.clone();
-    let has_key = api_key.is_some();
-
     std::thread::spawn(move || {
+        let (api_key, endpoint, model) = (api_key, endpoint, model);
+
         if !has_key {
             // ponytail: no API key → emit no_api_key once, then sleep forever (no git scans)
             publish(&SummaryData { no_api_key: true, ..Default::default() });
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(300));
-                // Re-check: user might have added key (requires app restart anyway, but harmless)
-                if config.settings.llm_api_key.as_ref().filter(|k| !k.is_empty()).is_some()
+                // Re-check: user might have added key (hot-reloadable config)
+                let (_, k, _, _, _, _, _, _, _, _, _, _) = read_config();
+                if k.filter(|k| !k.is_empty()).is_some()
                     || std::env::var("DEEPSEEK_API_KEY").ok().filter(|k| !k.is_empty()).is_some() {
-                    break; // restart the full loop with git scans
+                    break;
                 }
             }
         }
 
-        let tz: Tz = config
-            .settings
-            .timezone
-            .parse()
-            .unwrap_or(chrono_tz::UTC);
-        let store = SummaryStore::new(&config.settings.summary_cache_dir);
-        let debounce_secs = config.settings.summary_debounce_secs.max(60);
+        let (_, _, _, _, tz, day_start_hour, week_start_day,
+             debounce_secs, repos_dir, exclude_pattern, refresh_interval, config_dir) = read_config();
+        let debounce_secs = debounce_secs.max(60);
+
+        let store = SummaryStore::new(con);
         let mut last_call: Option<Instant> = None;
         let queue = app.state::<TaskQueue>();
-        let api_key = config.settings.llm_api_key.clone()
-            .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok())
-            .filter(|k| !k.is_empty());
+        let api_key = api_key.clone();
 
         std::thread::sleep(std::time::Duration::from_secs(1));
 
@@ -436,21 +459,20 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>, shared: SharedSum
             let cycle_start = Instant::now();
             let now_utc = Utc::now();
             let now_local = now_utc.with_timezone(&tz);
-            let day_s = time_utils::day_start(&now_local, config.settings.day_start_hour);
-            let week_s = time_utils::week_start(&now_local, config.settings.day_start_hour, config.settings.week_start_day);
+            let day_s = time_utils::day_start(&now_local, day_start_hour);
+            let week_s = time_utils::week_start(&now_local, day_start_hour, week_start_day);
 
             let day_date = day_s.format("%Y-%m-%d").to_string();
             let week_date = week_s.format("%Y-%m-%d").to_string();
             let day_since = day_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
             let week_since = week_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
-            let exclude = &config.settings.summary_exclude_pattern;
 
             let collect_id = queue.start("Collecting commits");
             let _ = app.emit("tasks-changed", ());
 
             let git_start = Instant::now();
-            let day_commits = collect_commits_filtered(&config.settings.repos_dir, &day_since, exclude);
-            let week_commits = collect_commits_filtered(&config.settings.repos_dir, &week_since, exclude);
+            let day_commits = collect_commits_filtered(&repos_dir, &day_since, &exclude_pattern);
+            let week_commits = collect_commits_filtered(&repos_dir, &week_since, &exclude_pattern);
             let git_ms = git_start.elapsed().as_millis();
 
             let day_total_commits: usize = day_commits.values().map(|v| v.len()).sum();
@@ -522,7 +544,7 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>, shared: SharedSum
                         queue.complete(llm_id);
                         let _ = app.emit("tasks-changed", ());
 
-                        perf_log(&config.config_dir, &format!(
+                        perf_log(&config_dir, &format!(
                             "LLM summaries ({}): {} repos in {}ms ({} commits)",
                             label, repo_summaries.len(), llm_ms, total
                         ));
@@ -562,20 +584,21 @@ pub fn spawn_summary_loop(app: AppHandle, config: Arc<Config>, shared: SharedSum
 
             let total_ms = cycle_start.elapsed().as_millis();
             let timing = format!("Summary cycle: {}ms (git:{}ms)", total_ms, git_ms);
-            perf_log(&config.config_dir, &timing);
+            perf_log(&config_dir, &timing);
             info!("{}", timing);
 
             std::thread::sleep(std::time::Duration::from_secs(
-                config.settings.refresh_interval.max(10),
+                refresh_interval.max(10),
             ));
         }
     });
 }
 
 pub fn reset_summaries(config: &Config) -> Result<(), String> {
-    let db_path = config.settings.summary_cache_dir.join("summaries.db");
+    let db_path = config.settings.usage_cache_dir.join("usage_cache.db");
     if db_path.exists() {
-        std::fs::remove_file(&db_path).map_err(|e| e.to_string())?;
+        let con = Connection::open(&db_path).map_err(|e| e.to_string())?;
+        con.execute("DELETE FROM summaries", []).map_err(|e| e.to_string())?;
     }
     job_log::log_ok("summary", "Summary cache reset");
     Ok(())

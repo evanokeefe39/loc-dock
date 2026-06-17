@@ -5,13 +5,12 @@ use chrono::{DateTime, Utc};
 use duckdb::Connection;
 use log::{info, warn};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 const RETENTION_DAYS: f64 = 7.0;
 const DAY_SECS: f64 = 86400.0;
 /// Timeline resolution — must match `data.rs::N_BUCKETS` (frontend expects this many).
 const N_BUCKETS: usize = 48;
-const DB_NAME: &str = "usage_cache.db";
 const MARKER: &str = "usage_cache.db.reset";
 const SCHEMA_VERSION: &str = "7";  // V2: SQL ingest; bumped to recover from poisoned registry
 
@@ -105,20 +104,38 @@ pub struct UsageStore {
     last_row_count: u64,
 }
 
-impl UsageStore {
-    pub fn new(source_manager: SourceManager, cache_dir: &Path, pricing: Pricing, config_dir: &Path) -> Self {
-        let _ = std::fs::create_dir_all(cache_dir);
-        let sql_templates = SqlTemplates::load(config_dir);
-
-        let marker = cache_dir.join(MARKER);
-        let db_path = cache_dir.join(DB_NAME);
-        if marker.exists() {
-            let _ = std::fs::remove_file(&db_path);
-            let _ = std::fs::remove_file(&marker);
-            info!("Usage cache reset via marker file");
+/// Open the DuckDB connection with retries — handles the hot-reload race where
+/// the previous process is mid-exit and still holds the file lock.
+pub(crate) fn open_usage_cache(db_path: &Path) -> Connection {
+    let mut last_err = None;
+    for attempt in 0..5 {
+        // Clean up stale WAL/temp files from crashed processes
+        if attempt > 0 {
+            let s = db_path.to_string_lossy();
+            let _ = std::fs::remove_file(Path::new(&format!("{}{}", s, ".wal")));
+            let _ = std::fs::remove_file(Path::new(&format!("{}{}", s, ".tmp")));
         }
+        match Connection::open(db_path) {
+            Ok(c) => return c,
+            Err(e) => {
+                last_err = Some(e);
+                if attempt < 4 {
+                    std::thread::sleep(Duration::from_millis(200 * (attempt + 1)));
+                }
+            }
+        }
+    }
+    eprintln!(
+        "[loc-dock] Fatal: Could not open usage cache at {:?}: {}\nAnother instance may be running. Exiting.",
+        db_path,
+        last_err.unwrap()
+    );
+    std::process::exit(1);
+}
 
-        let con = Connection::open(&db_path).expect("failed to open usage_cache.db");
+impl UsageStore {
+    pub fn new(source_manager: SourceManager, _cache_dir: &Path, pricing: Pricing, config_dir: &Path, con: Connection) -> Self {
+        let sql_templates = SqlTemplates::load(config_dir);
 
         // Guard rails for the SQL JSON-ingest path. The read_ndjson parse path holds
         // non-spillable buffers PER THREAD, so on a many-core box the bundled engine

@@ -441,8 +441,12 @@ html, body {
   display: flex;
   flex-direction: column;
   -webkit-app-region: no-drag;
-  padding: 6px;
+}
+
+.settings-scroll {
+  flex: 1;
   overflow-y: auto;
+  padding: 0 6px 6px;
 }
 
 .settings-panel {
@@ -452,12 +456,15 @@ html, body {
 }
 
 .settings-header {
+  flex-shrink: 0;
   display: flex;
   justify-content: space-between;
   align-items: center;
   font-size: var(--font-md);
   font-weight: bold;
   color: var(--text);
+  padding: 6px 6px 4px;
+  border-bottom: 1px solid var(--axis);
 }
 
 .settings-header-actions {

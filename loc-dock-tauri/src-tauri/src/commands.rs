@@ -1,13 +1,12 @@
 use crate::config::{Config, Settings};
 use crate::data::SharedStats;
-use crate::git_cache::GitCache;
 use crate::job_log::{self, LogEntry};
 use crate::summary::{self, SummaryData};
 use crate::task_queue::{ActiveTask, TaskQueue};
 use crate::theme::Theme;
 use crate::types::AllStats;
 use crate::usage_store::UsageStore;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tauri::{AppHandle, Manager, Window};
 
 // All commands are `async` so Tauri runs them on the async runtime's thread pool —
@@ -47,8 +46,11 @@ pub async fn get_settings() -> Settings {
 
 #[tauri::command]
 pub async fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
-    let config = app.state::<Arc<Config>>();
-    settings.save(&config.config_dir)?;
+    // Save to disk, then reload the shared config so background loops pick up changes.
+    let config_state = app.state::<Arc<RwLock<Config>>>();
+    let config_dir = config_state.read().unwrap().config_dir.clone();
+    settings.save(&config_dir)?;
+    *config_state.write().unwrap() = Config::load();
 
     let autostart = app.state::<tauri_plugin_autostart::AutoLaunchManager>();
     if settings.autostart {
@@ -65,8 +67,12 @@ pub async fn save_settings(app: AppHandle, settings: Settings) -> Result<(), Str
 }
 
 #[tauri::command]
-pub fn restart_app(app: AppHandle) {
-    app.restart();
+pub fn restart_app(_app: AppHandle) {
+    // ponytail: don't restart under dev mode (kills `tauri dev` watcher).
+    // Settings are saved + config reloaded in save_settings. The config is
+    // stored in Arc<RwLock<>> so background loops pick up changes on next cycle.
+    // If a full restart is truly needed, the user can tray → Exit and re-launch.
+    log::info!("Settings saved — no restart needed (config is hot-reloadable)");
 }
 
 #[tauri::command]
@@ -75,16 +81,8 @@ pub async fn get_active_tasks(app: AppHandle) -> Vec<ActiveTask> {
 }
 
 #[tauri::command]
-pub async fn reset_git_cache(app: AppHandle) -> Result<(), String> {
-    let dir = app.state::<Arc<Config>>().settings.git_cache_dir.clone();
-    GitCache::reset(&dir)?;
-    job_log::log_ok("git_cache", "Git cache reset");
-    Ok(())
-}
-
-#[tauri::command]
 pub async fn reset_usage_cache(app: AppHandle) -> Result<(), String> {
-    let dir = app.state::<Arc<Config>>().settings.usage_cache_dir.clone();
+    let dir = app.state::<Arc<RwLock<Config>>>().read().unwrap().settings.usage_cache_dir.clone();
     UsageStore::reset(&dir)?;
     job_log::log_ok("usage_cache", "Usage cache reset");
     Ok(())
@@ -92,19 +90,20 @@ pub async fn reset_usage_cache(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn reset_summary_cache(app: AppHandle) -> Result<(), String> {
-    let config = app.state::<Arc<Config>>().inner().clone();
-    summary::reset_summaries(&config)
+    let config_arc = app.state::<Arc<RwLock<Config>>>().inner().clone();
+    let cfg = config_arc.read().unwrap();
+    summary::reset_summaries(&cfg)
 }
 
 #[tauri::command]
 pub async fn get_job_logs(app: AppHandle) -> Vec<LogEntry> {
-    let dir = app.state::<Arc<Config>>().settings.log_dir.clone();
+    let dir = app.state::<Arc<RwLock<Config>>>().read().unwrap().settings.log_dir.clone();
     job_log::read_logs(&dir, 100)
 }
 
 #[tauri::command]
 pub async fn clear_job_logs(app: AppHandle) -> Result<(), String> {
-    let dir = app.state::<Arc<Config>>().settings.log_dir.clone();
+    let dir = app.state::<Arc<RwLock<Config>>>().read().unwrap().settings.log_dir.clone();
     job_log::clear_logs(&dir)
 }
 

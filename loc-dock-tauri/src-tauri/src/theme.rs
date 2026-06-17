@@ -83,10 +83,20 @@ impl Theme {
         let mut theme = if path.exists() {
             match std::fs::read_to_string(&path) {
                 Ok(content) => {
-                    match serde_yaml::from_str::<Theme>(&content) {
-                        Ok(t) => t,
-                        Err(e) => {
-                            warn!("Bad theme.yaml, using defaults: {}", e);
+                    // Read the first YAML document only — tolerates
+                    // multi-document markers ("---") the user or an editor may add.
+                    // serde_yaml::Deserializer yields one sub-deserializer per document.
+                    let mut de = serde_yaml::Deserializer::from_str(&content);
+                    match de.next() {
+                        Some(sub_de) => match Theme::deserialize(sub_de) {
+                            Ok(t) => t,
+                            Err(e) => {
+                                warn!("Bad theme.yaml, using defaults: {}", e);
+                                Theme::default()
+                            }
+                        },
+                        None => {
+                            warn!("Empty theme.yaml, using defaults");
                             Theme::default()
                         }
                     }

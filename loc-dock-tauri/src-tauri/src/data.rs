@@ -67,7 +67,20 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
             let day_utc_str = day_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
             let week_utc_str = week_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
 
-            // ponytail: prefill LOC from commit_stats for instant first paint.
+            // ponytail: prefill both totals AND bucket arrays so the graph renders instantly.
+            // Bucket queries are ~6ms each — negligible vs the 15s cycle.
+            let hi = now_utc.timestamp() as f64;
+            let day_lo = day_s_utc.timestamp() as f64;
+            let week_lo = week_s_utc.timestamp() as f64;
+
+            // Populate bucket arrays too so the graph shows data at paint time
+            let git_buckets_day = store.query_commit_buckets(day_lo, hi);
+            let git_buckets_week = store.query_commit_buckets(week_lo, hi);
+            let cost_buckets_day = store.query_cost_buckets(day_lo, hi);
+            let cost_buckets_week = store.query_cost_buckets(week_lo, hi);
+            let token_buckets_day = store.query_token_buckets(day_lo, hi);
+            let token_buckets_week = store.query_token_buckets(week_lo, hi);
+
             let build_range = |date: &str, utc_str: &str| -> RangeStats {
                 let (cost_total, cost_breakdown, tokens, sessions) = store.query_aggregates(date);
                 let source_breakdown = store.query_aggregate_source_breakdown(date);
@@ -85,6 +98,9 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
                 ready: true,
                 day: build_range(&day_date, &day_utc_str),
                 week: build_range(&week_date, &week_utc_str),
+                git_buckets_day, git_buckets_week,
+                cost_buckets_day, cost_buckets_week,
+                token_buckets_day, token_buckets_week,
                 ..Default::default()
             };
 

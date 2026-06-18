@@ -94,8 +94,11 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
                 }
             };
 
+            // ponytail: ready=false on cold start so chart shows spinner during first cycle.
+            // On warm start (initialized=true), data exists → show immediately.
+            let has_data = store.is_initialized();
             let prefilled = AllStats {
-                ready: true,
+                ready: has_data,
                 day: build_range(&day_date, &day_utc_str),
                 week: build_range(&week_date, &week_utc_str),
                 git_buckets_day, git_buckets_week,
@@ -223,6 +226,15 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
                 let data = build_summary_data(&store, &week_utc_str, &day_utc_str);
                 if let Ok(mut g) = summary_state.write() { *g = data.clone(); }
                 let _ = app.emit("summary-update", &data);
+            } else {
+                // No new commits or no API key — emit loaded-but-empty so loading:true stops spinning
+                let empty = SummaryData {
+                    loading: false,
+                    no_api_key: !summary_llm_configured(),
+                    ..Default::default()
+                };
+                if let Ok(mut g) = summary_state.write() { *g = empty.clone(); }
+                let _ = app.emit("summary-update", &empty);
             }
 
             // ── Per-source ETL: emit after each provider completes ──

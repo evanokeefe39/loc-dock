@@ -37,7 +37,12 @@ pub fn run() {
         Theme::load(&cfg.settings.theme_path)
     };
     let stats: SharedStats = Arc::new(RwLock::new(AllStats::default()));
-    let summary_state: summary::SharedSummary = Arc::new(RwLock::new(summary::SummaryData::default()));
+    // ponytail: start loading=true so frontend shows "Summaries are being generated..."
+    // instead of "No commits yet today" during initial cycle.
+    let summary_state: summary::SharedSummary = Arc::new(RwLock::new(summary::SummaryData {
+        loading: true,
+        ..Default::default()
+    }));
     let autostart_enabled = config.read().unwrap().settings.autostart;
 
     tauri::Builder::default()

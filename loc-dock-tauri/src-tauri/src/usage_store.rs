@@ -611,6 +611,12 @@ impl UsageStore {
 
 // ── Query methods ─────────────────────────────────────────────────
 
+    /// True if the store has at least one row of data (warm start).
+    /// Used by prefill to distinguish cold start (show spinner) from warm start (show data).
+    pub fn is_initialized(&self) -> bool {
+        self.initialized
+    }
+
     /// Query aggregates for a date range. Returns (total_cost, CostBreakdown, TokenTotals, sessions).
     /// Unlike query_since (which scans entries table), this reads from pre-computed daily_aggregates.
     /// O(number of days in range) vs O(number of entries in range).

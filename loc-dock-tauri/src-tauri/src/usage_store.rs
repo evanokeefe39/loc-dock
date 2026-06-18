@@ -1,3 +1,4 @@
+use crate::git::GitCommit;
 use crate::pricing::Pricing;
 use crate::source_adapter::{FileDiscoverer, SourceKind, SourceManager};
 use crate::types::{CostBreakdown, SourceStats, TokenTotals};
@@ -12,7 +13,7 @@ const DAY_SECS: f64 = 86400.0;
 /// Timeline resolution — must match `data.rs::N_BUCKETS` (frontend expects this many).
 const N_BUCKETS: usize = 48;
 const MARKER: &str = "usage_cache.db.reset";
-const SCHEMA_VERSION: &str = "7";  // V2: SQL ingest; bumped to recover from poisoned registry
+const SCHEMA_VERSION: &str = "8";  // v8: commit_stats + repo_summaries tables
 
 /// Files ingested per silver INSERT. Caps transient JSON-parse memory on cold
 /// rebuilds; smaller batches + bounded threads keep the non-spillable parse peak
@@ -166,7 +167,9 @@ impl UsageStore {
                  DROP TABLE IF EXISTS watermarks; \
                  DROP TABLE IF EXISTS file_tracker; \
                  DROP TABLE IF EXISTS ingested_files; \
-                 DROP TABLE IF EXISTS daily_aggregates;"
+                 DROP TABLE IF EXISTS daily_aggregates; \
+                 DROP TABLE IF EXISTS commit_stats; \
+                 DROP TABLE IF EXISTS repo_summaries;"
             );
             info!("Schema version {} → {}: reset tables", stored_ver, SCHEMA_VERSION);
         }
@@ -215,6 +218,36 @@ impl UsageStore {
                  loc_added        BIGINT NOT NULL DEFAULT 0,
                  loc_deleted      BIGINT NOT NULL DEFAULT 0,
                  UNIQUE(date, source)
+             );
+"
+        );
+
+        // v8: commit_stats — per-repo commit cache for incremental git scans.
+        // Stores one row per (repo, sha) with aggregated LOC and message.
+        // The data loop inserts new commits each cycle; past commits are immutable.
+        let _ = con.execute_batch(
+            "CREATE TABLE IF NOT EXISTS commit_stats (
+                 repo     TEXT NOT NULL,
+                 sha      TEXT NOT NULL,
+                 ts       TIMESTAMP NOT NULL,
+                 msg      TEXT,
+                 added    BIGINT NOT NULL,
+                 deleted  BIGINT NOT NULL,
+                 file_ct  INT NOT NULL DEFAULT 1,
+                 UNIQUE(repo, sha)
+             );
+"
+        );
+
+        // v8: repo_summaries — cached AI summaries per repo.
+        // Used by the data loop to detect per-repo changes and debounce LLM calls.
+        let _ = con.execute_batch(
+            "CREATE TABLE IF NOT EXISTS repo_summaries (
+                 repo_path       TEXT PRIMARY KEY,
+                 last_commit_sha TEXT NOT NULL,
+                 last_summary_ts TIMESTAMP NOT NULL,
+                 highlights      TEXT,
+                 model           TEXT
              );
 "
         );
@@ -301,9 +334,10 @@ impl UsageStore {
             .and_then(|mut stmt| stmt.query_row([], |row| row.get(0)))
             .unwrap_or(0);
         if (current_count as u64) > self.last_row_count {
-            self.last_row_count = current_count as u64;
             if let Err(e) = self.refresh_aggregates() {
                 warn!("Failed to refresh aggregates: {}", e);
+            } else {
+                self.last_row_count = current_count as u64;
             }
         }
 
@@ -478,6 +512,17 @@ fn bucket_sql(measures: &str) -> String {
     format!(
         "SELECT LEAST(CAST(floor((epoch(ts) - ?) / ?) AS INT), {last}) AS bucket, {measures}
          FROM entries
+         WHERE epoch(ts) >= ? AND epoch(ts) < ?
+         GROUP BY bucket",
+        last = N_BUCKETS - 1, measures = measures,
+    )
+}
+
+/// Same as `bucket_sql` but against the `commit_stats` table.
+fn commit_bucket_sql(measures: &str) -> String {
+    format!(
+        "SELECT LEAST(CAST(floor((epoch(ts) - ?) / ?) AS INT), {last}) AS bucket, {measures}
+         FROM commit_stats
          WHERE epoch(ts) >= ? AND epoch(ts) < ?
          GROUP BY bucket",
         last = N_BUCKETS - 1, measures = measures,
@@ -718,6 +763,109 @@ impl UsageStore {
     /// Distinct session counts (total since `since_str`, active since `active_str`).
     /// Queries `entries` directly — distinct counts are non-additive so they cannot
     /// come from `daily_aggregates` over multi-day ranges (Spike 5). Uncached (~6 ms).
+// ── Commit queries ────────────────────────────────────────────────
+
+    /// Insert new commits into `commit_stats` table (INSERT OR IGNORE).
+    pub fn insert_commits(&self, repo: &str, commits: &[GitCommit], _head_sha: &str) -> Result<usize, String> {
+        if commits.is_empty() {
+            return Ok(0);
+        }
+        let mut count = 0usize;
+        for c in commits {
+            let ts_rfc = c.ts.to_rfc3339();
+            match self.con.execute(
+                "INSERT OR IGNORE INTO commit_stats (repo, sha, ts, msg, added, deleted, file_ct) VALUES (?, ?, ?::TIMESTAMP, ?, ?, ?, ?)",
+                duckdb::params![repo, c.sha, ts_rfc, c.msg, c.added, c.deleted, c.file_count as i64],
+            ) {
+                Ok(n) => count += n as usize,
+                Err(e) => warn!("insert_commits: {}: {}", repo, e),
+            }
+        }
+        Ok(count)
+    }
+
+    /// Latest commit timestamp across all repos (for incremental scan).
+    /// Returns None if `commit_stats` is empty (first cycle).
+    pub fn latest_commit_ts(&self) -> Option<DateTime<Utc>> {
+        self.con
+            .prepare("SELECT MAX(ts) FROM commit_stats")
+            .ok()
+            .and_then(|mut stmt| stmt.query_row([], |row| row.get(0)).ok())
+    }
+
+    /// LOC timeline bucketed into `N_BUCKETS` slices over [lo, hi) (unix epoch secs).
+    /// Returns (added, deleted) per bucket. Exact match for `bucket_git` in data.rs.
+    pub fn query_commit_buckets(&self, lo: f64, hi: f64) -> Vec<(i64, i64)> {
+        let binsize = (hi - lo) / N_BUCKETS as f64;
+        if !(binsize > 0.0) { return vec![(0, 0); N_BUCKETS]; }
+        let mut out = vec![(0i64, 0i64); N_BUCKETS];
+        let sql = commit_bucket_sql("SUM(added)::BIGINT, SUM(deleted)::BIGINT");
+        match self.con.prepare(&sql) {
+            Ok(mut stmt) => match stmt.query_map([lo, binsize, lo, hi], |row| {
+                Ok((
+                    row.get::<_, i64>(0)? as usize,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            }) {
+                Ok(rows) => for r in rows.flatten() {
+                    if r.0 < N_BUCKETS { out[r.0] = (r.1, r.2); }
+                },
+                Err(e) => warn!("Commit buckets: {}", e),
+            },
+            Err(e) => warn!("Commit buckets prepare: {}", e),
+        }
+        out
+    }
+
+    /// Total LOC added/deleted since a timestamp string.
+    pub fn query_commit_totals(&self, since_str: &str) -> (i64, i64) {
+        let result = self.con.prepare(
+            "SELECT COALESCE(SUM(added), 0)::BIGINT, COALESCE(SUM(deleted), 0)::BIGINT
+             FROM commit_stats WHERE ts >= ?::TIMESTAMP"
+        );
+        match result {
+            Ok(mut stmt) => match stmt.query_row([since_str], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            }) {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!("Commit totals: {}", e);
+                    (0, 0)
+                }
+            },
+            Err(e) => {
+                warn!("Commit totals prepare: {}", e);
+                (0, 0)
+            }
+        }
+    }
+
+    /// Per-repo: (repo_name, latest_sha) for summary change detection.
+    /// Only returns repos that have at least one commit in the table.
+    pub fn repo_latest_shas(&self) -> Vec<(String, String)> {
+        match self.con.prepare(
+            "SELECT repo, sha FROM (
+                 SELECT repo, sha, ROW_NUMBER() OVER (PARTITION BY repo ORDER BY ts DESC) AS rn
+                 FROM commit_stats
+             ) sq WHERE rn = 1"
+        ) {
+            Ok(mut stmt) => match stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            }) {
+                Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+                Err(e) => {
+                    warn!("Repo SHAs: {}", e);
+                    Vec::new()
+                }
+            },
+            Err(e) => {
+                warn!("Repo SHAs prepare: {}", e);
+                Vec::new()
+            }
+        }
+    }
+
     pub fn count_sessions(&self, since_str: &str, active_str: &str) -> (i64, i64) {
         if !self.initialized { return (0, 0); }
         match self.con.prepare(
@@ -733,6 +881,69 @@ impl UsageStore {
                 Err(e) => { warn!("Session count: {}", e); (0, 0) }
             },
             Err(e) => { warn!("Session count prepare: {}", e); (0, 0) }
+        }
+    }
+
+// ── Summary cache ─────────────────────────────────────────────────
+
+    /// Read cached summary for a repo. Returns (highlights JSON, last_commit_sha).
+    pub fn get_repo_summary(&self, repo: &str) -> Option<(String, String)> {
+        self.con
+            .prepare("SELECT highlights, last_commit_sha FROM repo_summaries WHERE repo_path = ?")
+            .ok()
+            .and_then(|mut stmt| {
+                stmt.query_row([repo], |row| {
+                    Ok((
+                        row.get::<_, String>(0).unwrap_or_default(),
+                        row.get::<_, String>(1).unwrap_or_default(),
+                    ))
+                })
+                .ok()
+            })
+    }
+
+    /// Save/update repo summary after LLM call.
+    pub fn save_repo_summary(&self, repo: &str, sha: &str, highlights_json: &str, model: &str) {
+        let now = Utc::now().to_rfc3339();
+        if let Err(e) = self.con.execute(
+            "INSERT OR REPLACE INTO repo_summaries (repo_path, last_commit_sha, last_summary_ts, highlights, model) VALUES (?, ?, ?::TIMESTAMP, ?, ?)",
+            duckdb::params![repo, sha, now, highlights_json, model],
+        ) {
+            warn!("save_repo_summary {}: {}", repo, e);
+        }
+    }
+
+    /// Count commits for a specific repo since a timestamp string.
+    pub fn count_repo_commits_since(&self, repo: &str, since_str: &str) -> usize {
+        self.con
+            .prepare("SELECT COUNT(*) FROM commit_stats WHERE repo = ? AND ts >= ?::TIMESTAMP")
+            .ok()
+            .and_then(|mut stmt| {
+                stmt.query_row(duckdb::params![repo, since_str], |row| row.get::<_, i64>(0))
+                    .ok()
+                    .map(|n| n as usize)
+            })
+            .unwrap_or(0)
+    }
+
+    /// Get all repo names with non-null highlights (for building SummaryData).
+    pub fn all_summarized_repos(&self) -> Vec<(String, String)> {
+        match self.con.prepare(
+            "SELECT repo_path, highlights FROM repo_summaries WHERE highlights IS NOT NULL"
+        ) {
+            Ok(mut stmt) => match stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            }) {
+                Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+                Err(e) => {
+                    warn!("All summarized repos: {}", e);
+                    Vec::new()
+                }
+            },
+            Err(e) => {
+                warn!("All summarized repos prepare: {}", e);
+                Vec::new()
+            }
         }
     }
 }

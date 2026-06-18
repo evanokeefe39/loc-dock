@@ -135,10 +135,8 @@ pub fn run() {
                 log::info!("Usage cache reset via marker file");
             }
             let con = usage_store::open_usage_cache(&db_path);
-            let summary_con = con.try_clone().expect("failed to clone DuckDB connection");
 
-            data::spawn_data_loop(handle.clone(), config.clone(), stats.clone(), con);
-            summary::spawn_summary_loop(handle, config.clone(), summary_state.clone(), summary_con);
+            data::spawn_data_loop(handle.clone(), config.clone(), stats.clone(), summary_state.clone(), con);
             Ok(())
         })
         .run(tauri::generate_context!())

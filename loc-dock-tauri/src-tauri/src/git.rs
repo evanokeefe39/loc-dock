@@ -1,18 +1,25 @@
-use crate::git_cache::GitCache;
 use chrono::{DateTime, FixedOffset};
-use log::{info, warn};
-use rayon::prelude::*;
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use log::warn;
+use std::path::Path;
 use std::process::Command;
 use std::sync::OnceLock;
 
-/// A single numstat entry from a git commit, carrying the author timestamp
-/// and lines added/deleted for one file in that commit.
-pub struct GitPoint {
+/// Per-commit metadata with aggregated LOC and commit message.
+/// One row per (repo, sha) — added/deleted are summed across all files.
+pub struct GitCommit {
+    pub sha: String,
     pub ts: DateTime<FixedOffset>,
+    pub msg: String,
     pub added: i64,
     pub deleted: i64,
+    pub file_count: usize,
+}
+
+/// Commits collected from one repo.
+pub struct RepoCommits {
+    pub repo: String,
+    pub head_sha: String,
+    pub commits: Vec<GitCommit>,
 }
 
 static GIT_AVAILABLE: OnceLock<bool> = OnceLock::new();
@@ -44,6 +51,34 @@ fn configure_no_window(cmd: &mut Command) {
 #[cfg(not(target_os = "windows"))]
 fn configure_no_window(_cmd: &mut Command) {}
 
+// ── Per-repo commit scanning with SHA + message ─────────────────────────────
+
+/// Run `git log` on one repo with the given `--after` timestamp.
+/// Returns a `RepoCommits` with per-commit aggregates and the HEAD SHA.
+fn scan_one_repo(path: &Path, since_iso: &str) -> Option<RepoCommits> {
+    let repo = path.file_name()?.to_string_lossy().to_string();
+    let head_sha = get_head_sha(path)?;
+
+    let mut cmd = Command::new("git");
+    // ponytail: single git log call with both header and numstat.
+    // Format: %H|<ts>|<subject> interleaved with numstat lines.
+    cmd.args([
+        "log",
+        &format!("--after={}", since_iso),
+        "--format=%H|%aI|%s",
+        "--numstat",
+    ])
+    .current_dir(path)
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::null());
+    configure_no_window(&mut cmd);
+
+    let output = cmd.output().ok().filter(|o| o.status.success())?;
+    let commits = parse_git_commits(&String::from_utf8_lossy(&output.stdout));
+
+    Some(RepoCommits { repo, head_sha, commits })
+}
+
 fn get_head_sha(path: &Path) -> Option<String> {
     let mut cmd = Command::new("git");
     cmd.args(["rev-parse", "HEAD"])
@@ -57,136 +92,169 @@ fn get_head_sha(path: &Path) -> Option<String> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
-fn parse_git_log(stdout: &str) -> Vec<GitPoint> {
-    let mut points = Vec::new();
-    let mut current_time: Option<DateTime<FixedOffset>> = None;
+/// Parse `git log --format="%H|%aI|%s" --numstat` output.
+/// Returns one `GitCommit` per commit with aggregated LOC.
+fn parse_git_commits(stdout: &str) -> Vec<GitCommit> {
+    let mut commits: Vec<GitCommit> = Vec::new();
+    let mut sha: Option<String> = None;
+    let mut ts: Option<DateTime<FixedOffset>> = None;
+    let mut msg: Option<String> = None;
+    let mut added: i64 = 0;
+    let mut deleted: i64 = 0;
+    let mut file_count: usize = 0;
 
     for line in stdout.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
+
+        // Detect header line: SHA|<ts>|<subject>  (SHA is 40 hex chars)
+        // Numeric numstat lines start with digits and contain tabs.
         if line.starts_with(|c: char| c.is_ascii_digit()) && line.contains('\t') {
-            if let Some(ts) = current_time {
-                let parts: Vec<&str> = line.split('\t').collect();
-                if parts.len() >= 2 && parts[0] != "-" && parts[1] != "-" {
-                    if let (Ok(a), Ok(d)) = (parts[0].parse::<i64>(), parts[1].parse::<i64>()) {
-                        points.push(GitPoint { ts, added: a, deleted: d });
-                    }
+            // Numstat line
+            let fields: Vec<&str> = line.split('\t').collect();
+            if fields.len() >= 2 && fields[0] != "-" && fields[1] != "-" {
+                if let (Ok(a), Ok(d)) = (fields[0].parse::<i64>(), fields[1].parse::<i64>()) {
+                    added += a;
+                    deleted += d;
+                    file_count += 1;
                 }
             }
-        } else if let Ok(ts) = DateTime::parse_from_rfc3339(line) {
-            current_time = Some(ts);
-        } else {
-            current_time = DateTime::parse_from_str(line, "%Y-%m-%dT%H:%M:%S%z").ok();
+        } else if let Some((s, rest)) = line.split_once('|') {
+            // Commit header candidate: hex SHA followed by |
+            if s.len() >= 7 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+                // Finalize previous commit
+                if let (Some(prev_sha), Some(prev_ts), Some(prev_msg)) = (sha.take(), ts.take(), msg.take()) {
+                    commits.push(GitCommit {
+                        sha: prev_sha,
+                        ts: prev_ts,
+                        msg: prev_msg,
+                        added,
+                        deleted,
+                        file_count,
+                    });
+                }
+                let (ts_str, rest2) = rest.split_once('|').unwrap_or((rest, ""));
+                sha = Some(s.to_string());
+                ts = DateTime::parse_from_rfc3339(ts_str)
+                    .or_else(|_| DateTime::parse_from_str(ts_str, "%Y-%m-%dT%H:%M:%S%z"))
+                    .ok();
+                msg = Some(rest2.to_string());
+                added = 0;
+                deleted = 0;
+                file_count = 0;
+            }
         }
     }
-    points
-}
 
-fn run_git_log(path: &Path, since: &str) -> Vec<GitPoint> {
-    let mut cmd = Command::new("git");
-    cmd.args(["log", &format!("--since={}", since), "--format=%aI", "--numstat"])
-        .current_dir(path)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
-    configure_no_window(&mut cmd);
-
-    match cmd.output() {
-        Ok(o) if o.status.success() => parse_git_log(&String::from_utf8_lossy(&o.stdout)),
-        _ => Vec::new(),
+    // Finalize last commit
+    if let (Some(s), Some(t), Some(m)) = (sha, ts, msg) {
+        commits.push(GitCommit {
+            sha: s,
+            ts: t,
+            msg: m,
+            added,
+            deleted,
+            file_count,
+        });
     }
+
+    commits
 }
 
-/// Scan git repos under `repos_dir`, using `cache` for incremental updates.
-/// Returns all points since `since_iso`, sorted ascending by timestamp.
-///
-/// Incremental strategy (PERF-001):
-/// - Repos whose HEAD SHA matches the cache are **skipped entirely**
-/// - Repos with a changed SHA only scan commits newer than `latest_ts`
-/// - Git log calls run in parallel via rayon
-pub fn get_git_loc_timeline(repos_dir: &Path, since_iso: &str, cache: &GitCache) -> Vec<GitPoint> {
+/// Scan all repos under `repos_dir` for commits newer than `since_iso`.
+/// Returns one `RepoCommits` per repo that has new commits (empty repos excluded).
+/// Caller stores results in DuckDB for incremental tracking.
+pub fn collect_new_commits(repos_dir: &Path, since_iso: &str) -> Vec<RepoCommits> {
     if !check_git() || !repos_dir.exists() {
-        return cache.query_since(since_iso);
+        return Vec::new();
     }
 
     let entries = match std::fs::read_dir(repos_dir) {
         Ok(e) => e,
-        Err(_) => return cache.query_since(since_iso),
+        Err(_) => return Vec::new(),
     };
 
-    let mut disk_repos = HashSet::new();
-
-    // Phase 1 (sequential): discover repos, check SHAs, collect work items
-    struct RepoWork {
-        name: String,
-        path: PathBuf,
-        current_sha: String,
-        effective_since: String,
-    }
-
-    let mut repo_work: Vec<RepoWork> = Vec::new();
-
+    let mut results = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_dir() || !path.join(".git").exists() {
             continue;
         }
-        let repo_name = match path.file_name() {
-            Some(n) => n.to_string_lossy().to_string(),
-            None => continue,
-        };
-        disk_repos.insert(repo_name.clone());
-
-        let current_sha = match get_head_sha(&path) {
-            Some(sha) => sha,
-            None => continue,
-        };
-
-        let cached_sha = cache.get_head_sha(&repo_name);
-        let sha_matches = cached_sha.as_deref() == Some(&current_sha);
-
-        if sha_matches {
-            // No new commits since last scan — skip entirely
-            continue;
+        if let Some(rc) = scan_one_repo(&path, since_iso) {
+            if !rc.commits.is_empty() {
+                results.push(rc);
+            }
         }
-
-        if cached_sha.is_some() {
-            info!("Git cache: SHA mismatch for {}, scanning new commits", repo_name);
-        }
-
-        let effective_since = cache.latest_ts(&repo_name).unwrap_or_else(|| since_iso.to_string());
-
-        repo_work.push(RepoWork {
-            name: repo_name,
-            path,
-            current_sha,
-            effective_since,
-        });
     }
 
-    // Phase 2 (parallel): run git log calls concurrently via rayon
-    let results: Vec<(String, Vec<GitPoint>, String)> = repo_work
-        .into_par_iter()
-        .map(|work| {
-            let new_points = run_git_log(&work.path, &work.effective_since);
-            (work.name, new_points, work.current_sha)
-        })
-        .collect();
+    // Sort by earliest commit ts for consistent insertion order
+    results.sort_by(|a, b| {
+        a.commits
+            .first()
+            .map(|c| &c.ts)
+            .cmp(&b.commits.first().map(|c| &c.ts))
+    });
+    results
+}
 
-    // Phase 3 (sequential): insert results into cache
-    for (repo_name, new_points, current_sha) in &results {
-        cache.purge_repo(repo_name);
-        cache.insert_points(repo_name, new_points);
-        cache.set_head_sha(repo_name, current_sha);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_git_commits_basic() {
+        let output = "\
+abc123def4567890123456789012345678901234|2024-01-15T10:30:00+01:00|Add user auth
+1\t1\tsrc/auth.rs
+2\t0\tsrc/login.rs
+
+fedcba9876543210987654321098765432109876|2024-01-15T11:00:00+01:00|Fix payment bug
+5\t3\tsrc/pay.rs
+0\t1\tsrc/refund.rs
+";
+        let commits = parse_git_commits(output);
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].sha, "abc123def4567890123456789012345678901234");
+        assert_eq!(commits[0].msg, "Add user auth");
+        assert_eq!(commits[0].added, 3);
+        assert_eq!(commits[0].deleted, 1);
+        assert_eq!(commits[0].file_count, 2);
+        assert_eq!(commits[1].sha, "fedcba9876543210987654321098765432109876");
+        assert_eq!(commits[1].added, 5);
+        assert_eq!(commits[1].deleted, 4);
+        assert_eq!(commits[1].file_count, 2);
     }
 
-    // Prune repos removed from disk
-    for stale in cache.cached_repos().difference(&disk_repos) {
-        info!("Git cache: repo {} removed from disk, purging", stale);
-        cache.purge_repo(stale);
+    #[test]
+    fn test_parse_git_commits_no_commits() {
+        let commits = parse_git_commits("");
+        assert!(commits.is_empty());
     }
 
-    cache.prune_before(since_iso);
-    cache.query_since(since_iso)
+    #[test]
+    fn test_parse_git_commits_single_commit() {
+        let output = "\
+abcd1234abcd1234abcd1234abcd1234abcd1234|2024-06-01T00:00:00Z|Initial commit
+10\t0\tsrc/main.rs
+";
+        let commits = parse_git_commits(output);
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].added, 10);
+        assert_eq!(commits[0].deleted, 0);
+        assert_eq!(commits[0].file_count, 1);
+    }
+
+    #[test]
+    fn test_parse_git_commits_msg_with_pipe() {
+        // Commit message contains "|" — splitn(3, '|') should keep it.
+        let output = "\
+abcd1234abcd1234abcd1234abcd1234abcd1234|2024-01-15T00:00:00Z|fix | bug | again
+1\t1\tsrc/lib.rs
+";
+        let commits = parse_git_commits(output);
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].msg, "fix | bug | again");
+    }
 }

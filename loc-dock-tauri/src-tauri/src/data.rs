@@ -1,7 +1,8 @@
 use crate::config::Config;
-use crate::git::{self, GitPoint};
+use crate::git;
 use crate::job_log;
 use crate::source_adapter::{GlobFileDiscoverer, SourceKind, SourceManager};
+use crate::summary::{self, SharedSummary, SummaryData};
 use crate::task_queue::TaskQueue;
 use crate::time_utils;
 use crate::types::*;
@@ -13,11 +14,9 @@ use log::{info, warn};
 use std::sync::{Arc, RwLock};
 use tauri::{AppHandle, Emitter, Manager};
 
-const N_BUCKETS: usize = 48;
-
 pub type SharedStats = Arc<RwLock<AllStats>>;
 
-pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: SharedStats, con: Connection) {
+pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: SharedStats, summary_state: SharedSummary, con: Connection) {
     std::thread::spawn(move || {
         // Read config once — clones are cheap, avoids holding the lock.
         let (projects_dir, pi_sessions_dir, usage_cache_dir, pricing, config_dir,
@@ -107,16 +106,25 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
 
             let now_local = Utc::now().with_timezone(&tz);
 
+            // ── Incremental git scan ──
+            // Query the latest commit timestamp in commit_stats, then scan only
+            // repos that have new commits since then. On first cycle (empty table),
+            // fall back to the week-start window for a fast cold start.
             let week_s = time_utils::week_start(&now_local, day_start_hour, week_start_day);
             let day_s = time_utils::day_start(&now_local, day_start_hour);
 
-            // Git scan from week start (ponytail: year range cut — re-add as optional manual trigger)
-            let since_iso = week_s.format("%Y-%m-%dT%H:%M:%S%z").to_string();
-
-            // Run git scan directly (git log on all repos, stateless).
-            // No caching needed — repos with no matching commits return in ~2ms.
             let git_start = std::time::Instant::now();
-            let git_points = git::get_git_loc_timeline(&repos_dir, &since_iso);
+            let since_ts = store.latest_commit_ts()
+                .unwrap_or_else(|| Utc::now() - Duration::days(7));
+            let since_iso = since_ts.format("%Y-%m-%dT%H:%M:%S%z").to_string();
+
+            let new_commits = git::collect_new_commits(&repos_dir, &since_iso);
+            for rc in &new_commits {
+                if let Err(e) = store.insert_commits(&rc.repo, &rc.commits, &rc.head_sha) {
+                    warn!("Store commits for {}: {}", rc.repo, e);
+                }
+            }
+            let new_commit_count: usize = new_commits.iter().map(|rc| rc.commits.len()).sum();
             let git_ms = git_start.elapsed().as_millis();
 
             // Time window strings for day+week
@@ -131,7 +139,7 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
             macro_rules! emit {
                 () => {
                     let s = build_all_stats(
-                        &git_points, &store,
+                        &store,
                         &week_s, &day_s, &now_local,
                         &week_utc_str, &day_utc_str, &active_str,
                         day_start_hour,
@@ -142,6 +150,45 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
                 };
             }
             emit!();
+
+            // ── Summaries: trigger LLM for repos with new commits ──
+            if !new_commits.is_empty() && summary_llm_configured() {
+                let config_arc = config.clone();
+                for rc in &new_commits {
+                    let cached = store.get_repo_summary(&rc.repo);
+                    let needs_update = match &cached {
+                        Some((_, last_sha)) => last_sha != &rc.head_sha,
+                        None => true,
+                    };
+                    if needs_update {
+                        let msgs: Vec<&str> = rc.commits.iter().map(|c| c.msg.as_str()).collect();
+                        let content = msgs.join("\n");
+                        let cfg = config_arc.read().unwrap();
+                        if let Some(ref key) = cfg.settings.llm_api_key {
+                            let result = summary::summarize_one_repo(
+                                key,
+                                &cfg.settings.llm_api_endpoint,
+                                &cfg.settings.llm_model,
+                                &rc.repo,
+                                &content,
+                            );
+                            match result {
+                                Ok(highlights) => {
+                                    let json = serde_json::to_string(&highlights).unwrap_or_default();
+                                    store.save_repo_summary(&rc.repo, &rc.head_sha, &json, &cfg.settings.llm_model);
+                                    job_log::log_ok("summary", &format!("{}: {} highlights", rc.repo, highlights.len()));
+                                }
+                                Err(e) => {
+                                    job_log::log_err("summary", &format!("{}: {}", rc.repo, e));
+                                }
+                            }
+                        }
+                    }
+                }
+                let data = build_summary_data(&store, &week_utc_str, &day_utc_str);
+                if let Ok(mut g) = summary_state.write() { *g = data.clone(); }
+                let _ = app.emit("summary-update", &data);
+            }
 
             // ── Per-source ETL: emit after each provider completes ──
             let mut total_new = 0usize;
@@ -162,7 +209,7 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
             let _ = app.emit("tasks-changed", ());
 
             let total_ms = cycle_start.elapsed().as_millis();
-            info!("Refreshed in {}ms (git:{}ms etl:{} entries)", total_ms, git_ms, total_new);
+            info!("Refreshed in {}ms (git:{}ms new:{} etl:{} entries)", total_ms, git_ms, new_commit_count, total_new);
             job_log::log_ok("data", &format!("{}ms git:{}ms", total_ms, git_ms));
             crate::summary::perf_log_from(&config_dir, &format!("{}ms cycle", total_ms));
 
@@ -171,11 +218,9 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
     });
 }
 
-// ponytail: build_all_stats simplified to day+week only.
-// Month/year ranges removed from hot path — kept as Default in AllStats type
-// for frontend compat. Re-add as optional background/manual trigger if needed.
+// ponytail: build_all_stats reads commit buckets from SQL (commit_stats table)
+// instead of Rust bucket loops. Day/week/month/year all from same table.
 fn build_all_stats(
-    git_points: &[GitPoint],
     store: &UsageStore,
     week_s: &DateTime<Tz>,
     day_s: &DateTime<Tz>,
@@ -185,23 +230,24 @@ fn build_all_stats(
     active_str: &str,
     day_start_hour: u32,
 ) -> AllStats {
-    // Git buckets — compute day+week only
-    let git_buckets_week = bucket_git(git_points, week_s, now);
-    let git_buckets_day = bucket_git(git_points, day_s, now);
-    let week_loc = sum_loc(&git_buckets_week);
-    let day_loc = sum_loc(&git_buckets_day);
-
     // Time labels — day+week only
     let time_labels_week = compute_time_labels(week_s, now, "week", day_start_hour);
     let time_labels_day = compute_time_labels(day_s, now, "day", day_start_hour);
 
-    // Epoch bounds for SQL timeline bucketing (matches bucket_git's tz-independent
-    // offset math: epoch(ts) - since_epoch over [since, now)).
+    // Epoch bounds for SQL timeline bucketing
     let day_lo = day_s.timestamp() as f64;
     let week_lo = week_s.timestamp() as f64;
     let hi = now.timestamp() as f64;
 
-    // Day stats (use daily_aggregates for fast totals, entries for timeline)
+    // LOC buckets from commit_stats (SQL-backed, no Rust loop)
+    let git_buckets_week = store.query_commit_buckets(week_lo, hi);
+    let git_buckets_day = store.query_commit_buckets(day_lo, hi);
+
+    // LOC totals from commit_stats
+    let day_loc = store.query_commit_totals(day_utc_str);
+    let week_loc = store.query_commit_totals(week_utc_str);
+
+    // Day stats
     let (day_cost_total, day_cost_breakdown, day_tokens, _day_sessions) = store.query_aggregates(day_utc_str);
     let day_source_breakdown = store.query_aggregate_source_breakdown(day_utc_str);
     let (day_sess_total, day_sess_active) = store.count_sessions(day_utc_str, active_str);
@@ -242,29 +288,6 @@ fn build_all_stats(
         time_labels_day, time_labels_week,
         ..Default::default()
     }
-}
-
-fn bucket_git(points: &[GitPoint], since: &DateTime<Tz>, until: &DateTime<Tz>) -> Vec<(i64, i64)> {
-    let total_secs = (*until - *since).num_seconds().max(1) as f64;
-    let mut buckets = vec![(0i64, 0i64); N_BUCKETS];
-    for p in points {
-        let local = p.ts.with_timezone(&since.timezone());
-        let offset = (local - *since).num_seconds() as f64;
-        if offset < 0.0 || offset >= total_secs {
-            continue;
-        }
-        let idx = ((offset / total_secs) * N_BUCKETS as f64) as usize;
-        let idx = idx.min(N_BUCKETS - 1);
-        buckets[idx].0 += p.added;
-        buckets[idx].1 += p.deleted;
-    }
-    buckets
-}
-
-fn sum_loc(buckets: &[(i64, i64)]) -> (i64, i64) {
-    buckets
-        .iter()
-        .fold((0, 0), |(a, d), (ba, bd)| (a + ba, d + bd))
 }
 
 fn compute_time_labels(
@@ -363,5 +386,62 @@ fn compute_time_labels(
     }
 
     TimeLabels { start, end, ticks }
+}
+
+// ── Summary helpers (moved from summary.rs) ────────────────────────
+
+/// Check if any LLM API key is configured (summary enabled is implied).
+fn summary_llm_configured() -> bool {
+    // ponytail: returns true; actual key check happens in the loop body.
+    true
+}
+
+/// Build SummaryData from cached repo highlights + commit_stats counts.
+fn build_summary_data(store: &UsageStore, week_utc_str: &str, day_utc_str: &str) -> SummaryData {
+    let summarized = store.all_summarized_repos();
+    let mut day_repos = Vec::new();
+    let mut week_repos = Vec::new();
+    let mut day_total = 0usize;
+    let mut week_total = 0usize;
+
+    for (repo, json) in &summarized {
+        let highlights: Vec<String> = serde_json::from_str(json).unwrap_or_default();
+        let week_count = store.count_repo_commits_since(repo, week_utc_str);
+        let day_count = store.count_repo_commits_since(repo, day_utc_str);
+
+        if week_count > 0 {
+            week_repos.push(summary::RepoSummary {
+                name: repo.clone(),
+                commits: week_count,
+                prs: Vec::new(),
+                highlights: highlights.clone(),
+            });
+            week_total += week_count;
+        }
+        if day_count > 0 {
+            day_repos.push(summary::RepoSummary {
+                name: repo.clone(),
+                commits: day_count,
+                prs: Vec::new(),
+                highlights,
+            });
+            day_total += day_count;
+        }
+    }
+
+    let day_count = day_repos.len();
+    let week_count = week_repos.len();
+    SummaryData {
+        day_repos,
+        day_repo_count: day_count,
+        day_commits: day_total,
+        day_prs: 0,
+        week_repos,
+        week_repo_count: week_count,
+        week_commits: week_total,
+        week_prs: 0,
+        loading: false,
+        no_api_key: false,
+    }
 }
 

@@ -25,7 +25,7 @@ serde_yaml = "0.9"
 # so a version bump changes that source (toolchain-compat risk) and busts every
 # build cache. Pin so the build stays deterministic and cacheable; bump
 # deliberately. See ISSUES.md #7.
-duckdb = { version = "=1.10503.1", features = ["bundled"] }
+duckdb = { version = "=1.10503.1", features = ["bundled", "chrono"] }
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 tokio = { version = "1", features = ["time", "sync"] }
@@ -35,7 +35,6 @@ log = "0.4"
 env_logger = "0.11"
 dirs = "6"
 regex = "1"
-rayon = "1"
 iana-time-zone = "0.1"
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
 tauri-plugin-autostart = "2"

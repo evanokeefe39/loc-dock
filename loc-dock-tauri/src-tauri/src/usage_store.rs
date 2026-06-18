@@ -1,6 +1,6 @@
 use crate::git::GitCommit;
 use crate::pricing::Pricing;
-use crate::source_adapter::{FileDiscoverer, SourceKind, SourceManager};
+use crate::source_adapter::{GlobFileDiscoverer, SourceKind, SourceManager};
 use crate::types::{CostBreakdown, SourceStats, TokenTotals};
 use chrono::{DateTime, Utc};
 use duckdb::Connection;
@@ -10,9 +10,6 @@ use std::time::{Duration, SystemTime};
 
 const RETENTION_DAYS: f64 = 400.0;
 const DAY_SECS: f64 = 86400.0;
-/// Default timeline resolution for day view (48 × 30min buckets).
-#[cfg_attr(not(test), allow(dead_code))]
-const N_BUCKETS: usize = 48;
 const MARKER: &str = "usage_cache.db.reset";
 const SCHEMA_VERSION: &str = "9";  // v9: clean bad timezone-shifted commit_stats timestamps
 
@@ -44,18 +41,8 @@ impl SqlTemplates {
         }
     }
 
-    fn format_claude(&self, paths_array: &str, pricing: &Pricing) -> String {
-        self.claude_silver
-            .replace("{PATHS}", paths_array)
-            .replace("{INPUT_PRICE}", &pricing.input_price.to_string())
-            .replace("{OUTPUT_PRICE}", &pricing.output_price.to_string())
-            .replace("{CACHE_WRITE_PRICE}", &pricing.cache_write_price.to_string())
-            .replace("{CACHE_READ_PRICE}", &pricing.cache_read_price.to_string())
-            .replace("{MAX_OBJECT_SIZE}", &MAX_OBJECT_SIZE.to_string())
-    }
-
-    fn format_pi(&self, paths_array: &str, pricing: &Pricing) -> String {
-        self.pi_silver
+    fn format_sql(&self, template: &str, paths_array: &str, pricing: &Pricing) -> String {
+        template
             .replace("{PATHS}", paths_array)
             .replace("{INPUT_PRICE}", &pricing.input_price.to_string())
             .replace("{OUTPUT_PRICE}", &pricing.output_price.to_string())
@@ -76,15 +63,6 @@ fn load_or_fallback(path: &Path, bundled: &str) -> String {
         }
     }
     bundled.to_string()
-}
-
-// ponytail: kept for future use; per-source ETL in data loop doesn't need this
-#[allow(dead_code)]
-#[derive(Default, Debug)]
-pub struct EtlResult {
-    pub total_entries: usize,
-    pub claude_new: usize,
-    pub pi_new: usize,
 }
 
 /// File-backed DuckDB store that ingests normalized session usage entries
@@ -314,7 +292,7 @@ impl UsageStore {
 
         for pair in &self.source_manager.pairs {
             if pair.1.name() == name {
-                let n = process_source(&self.con, &*pair.0, pair.1, cutoff, &self.pricing, &self.sql_templates)?;
+                let n = process_source(&self.con, &pair.0, pair.1, cutoff, &self.pricing, &self.sql_templates)?;
                 self.initialized = true;
                 return Ok(n);
             }
@@ -359,21 +337,6 @@ impl UsageStore {
         }
     }
 
-    /// Run single-phase ETL over the 7-day retention window (all sources).
-    /// Convenience wrapper — prefer per-source emits via process_source_named.
-    #[allow(dead_code)]
-    pub fn run_etl(&mut self) -> Result<EtlResult, String> {
-        let names = self.source_names();
-        let mut result = EtlResult::default();
-        for name in &names {
-            let n = self.process_source_named(name)?;
-            if name == "claude" { result.claude_new += n; } else { result.pi_new += n; }
-            result.total_entries += n;
-        }
-        self.finalize_etl();
-        info!("ETL: processed {} entries (claude:{} pi:{})", result.total_entries, result.claude_new, result.pi_new);
-        Ok(result)
-    }
 }
 
 /// Process one source: discover files within the retention window, ingest only
@@ -387,7 +350,7 @@ impl UsageStore {
 /// — globbing in DuckDB would read full history (Spike 4 memory regression).
 fn process_source(
     con: &Connection,
-    discoverer: &dyn FileDiscoverer,
+    discoverer: &GlobFileDiscoverer,
     kind: SourceKind,
     cutoff: f64,
     pricing: &Pricing,
@@ -487,8 +450,8 @@ fn ingest_files(con: &Connection, kind: SourceKind, paths: &[PathBuf], pricing: 
     }
     let paths_array = paths_to_sql_array(paths);
     let sql = match kind {
-        SourceKind::Claude => templates.format_claude(&paths_array, pricing),
-        SourceKind::Pi => templates.format_pi(&paths_array, pricing),
+        SourceKind::Claude => templates.format_sql(&templates.claude_silver, &paths_array, pricing),
+        SourceKind::Pi => templates.format_sql(&templates.pi_silver, &paths_array, pricing),
     };
 
     if kind == SourceKind::Pi {

@@ -1,11 +1,8 @@
 use crate::config::Config;
 use crate::job_log;
-use chrono::Utc;
 use duckdb::Connection;
 use log::info;
 use serde::{Deserialize, Serialize};
-use std::io::Write;
-use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 /// Latest computed summary, shared with the `get_summary` command so the UI reads
@@ -33,14 +30,6 @@ pub struct SummaryData {
     pub week_prs: usize,
     pub loading: bool,
     pub no_api_key: bool,
-}
-
-pub fn perf_log_from(config_dir: &Path, msg: &str) {
-    let path = config_dir.join("perf.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let ts = Utc::now().format("%Y-%m-%d %H:%M:%S");
-        let _ = writeln!(f, "[{}] {}", ts, msg);
-    }
 }
 
 /// Call an OpenAI-compatible chat completions API with retry + exponential backoff.

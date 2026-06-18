@@ -57,7 +57,6 @@ fn configure_no_window(_cmd: &mut Command) {}
 /// Returns a `RepoCommits` with per-commit aggregates and the HEAD SHA.
 fn scan_one_repo(path: &Path, since_iso: &str) -> Option<RepoCommits> {
     let repo = path.file_name()?.to_string_lossy().to_string();
-    let head_sha = get_head_sha(path)?;
 
     let mut cmd = Command::new("git");
     // ponytail: single git log call with both header and numstat.
@@ -75,21 +74,10 @@ fn scan_one_repo(path: &Path, since_iso: &str) -> Option<RepoCommits> {
 
     let output = cmd.output().ok().filter(|o| o.status.success())?;
     let commits = parse_git_commits(&String::from_utf8_lossy(&output.stdout));
+    // ponytail: head_sha not used by insert_commits, but carried for future summary tracking.
+    let head_sha = commits.first().map(|c| c.sha.clone()).unwrap_or_default();
 
     Some(RepoCommits { repo, head_sha, commits })
-}
-
-fn get_head_sha(path: &Path) -> Option<String> {
-    let mut cmd = Command::new("git");
-    cmd.args(["rev-parse", "HEAD"])
-        .current_dir(path)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
-    configure_no_window(&mut cmd);
-    cmd.output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
 /// Parse `git log --format="%H|%aI|%s" --numstat` output.
@@ -293,11 +281,6 @@ abcd1234abcd1234abcd1234abcd1234abcd1234|2024-06-01T00:00:00Z|Initial commit
             .unwrap();
         assert!(commit.status.success(), "git commit failed: {}",
             String::from_utf8_lossy(&commit.stderr));
-
-        // Also verify get_head_sha works
-        let sha = get_head_sha(&dir);
-        assert!(sha.is_some(), "get_head_sha should return a SHA");
-        assert_eq!(sha.unwrap().len(), 40, "SHA should be 40 hex chars");
 
         // Now run collect_new_commits with a wide window
         let parent = dir.parent().unwrap();

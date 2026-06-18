@@ -44,12 +44,12 @@ function App() {
       .catch(() => {});
   }, []);
 
-  // Fetch hideNoPrs setting
+  // Fetch hideNoPrs setting once on mount (setting is stable during a session)
   useEffect(() => {
     invoke<{ hide_repos_without_prs: boolean }>("get_settings")
       .then(s => setHideNoPrs(s.hide_repos_without_prs))
       .catch(() => {});
-  }, [settingsOpen, setHideNoPrs]);
+  }, [setHideNoPrs]);
 
   // Listen for open-settings event
   useEffect(() => {

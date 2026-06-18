@@ -12,6 +12,9 @@ for the full plan and spike results.
   <50ms first paint. Sleeps `refresh_interval.max(10)`s between cycles.
 - `summary.rs::spawn_summary_loop` — collects recent commits + LLM summary into
   `SharedSummary`. Fully independent of the data loop (owns all its own git/LLM work).
+- Both loops **share a single DuckDB `Connection`** (opened in `lib.rs` setup, cloned via
+  `try_clone()`). The `Database` handle is reference-counted, so DuckDB's internal locking
+  never conflicts between the two loops.
 - Frontend hooks (`useStats`, `useSummary`) poll `get_stats` / `get_summary` every ~10s.
   Commands are `async` and only read shared state — they never block the UI. The summary
   loop emits `summary-update` events (frontend listens for instant updates) and both loops
@@ -36,9 +39,31 @@ for the full plan and spike results.
 
 **Superseded by V2** (legacy sections below are historical record, not current design):
 watermark tracking, two-phase ETL (`run_etl_urgent`/`run_etl_background`), the seek/tail
-byte-positioning state machine, the RefCell query cache, and year-start git scanning
-(now week-start, incremental per-repo via `git_cache`). The Appender vs `INSERT OR IGNORE`
+byte-positioning state machine, the RefCell query cache, year-start git scanning, and the
+git_cache (separate DuckDB for SHA tracking + incremental scan — removed in favor of
+stateless `git log` every cycle). The Appender vs `INSERT OR IGNORE`
 finding (BUG-004/PERF-006) still holds.
+
+**Startup & single-instance:**
+- `lib.rs::enforce_single_instance` — writes a PID lock file (`instance.lock`). On subsequent
+  launches, reads the file, checks if the PID is alive via `tasklist` (Windows) / `kill -0`
+  (Unix), and exits cleanly if another instance is running. Works even for old builds that
+  predate `tauri-plugin-single-instance`.
+- `tauri-plugin-single-instance` — additional guard for builds that have the plugin. The
+  callback fires on the **first** instance when a duplicate connects; the plugin kills the
+  second instance automatically.
+- **DuckDB open with retry** — `open_usage_cache()` retries `Connection::open` 5× with
+  linear backoff (200-1000ms). On retry, removes stale `.wal`/`.tmp` files from crashed
+  processes. Handles hot-reload races where `tauri dev` kills + restarts the app.
+
+**Config hot-reload (no restart needed):**
+- Config is stored as `Arc<RwLock<Config>>` in Tauri managed state.
+- `save_settings` writes to disk + reloads the shared `RwLock` from a fresh `Config::load()`.
+- `restart_app` is now a **no-op** — settings take effect immediately. Under `tauri dev`,
+  the old `app.restart()` killed the dev watcher, leaving an orphaned app.
+- The summary loop re-reads config each cycle via a `read_config()` closure — API key,
+  model, and endpoint changes are picked up live without restart.
+- The data loop reads config once at spawn time (values rarely change).
 
 ## Gotchas & Hard Constraints
 
@@ -46,6 +71,20 @@ Findings that still bind current code. (The pre-V2 bug/perf/ADR log — watermar
 poisoning, two-phase ETL, year-start git scan, missing ts index, query caching, the
 `estimate_cost` cost divergence — is resolved or superseded by the V2 architecture above
 and is no longer tracked here. Open work lives in [`ISSUES.md`](ISSUES.md).)
+
+### `Connection` is `Send` but not `Clone`
+
+DuckDB's `Connection` implements `Send` but not `Clone`. To share a single `Database`
+handle across threads, use `Connection::try_clone()` which returns a `Result<Connection>`.
+This is used in `lib.rs` setup to give both the data loop and summary loop a connection
+backed by the same in-memory `Database` handle. Do not call `Connection::open()` twice.
+
+### Stale WAL files block DuckDB open
+
+When the previous process crashes or is killed, DuckDB's `.wal` file persists and claims
+the database is still open. The retry loop in `open_usage_cache()` removes `.wal` and
+`.tmp` files on each retry attempt. On Windows, `std::fs::remove_file` fails silently if
+the file is actively locked by a live process, so this is safe.
 
 ### DuckDB Appender does NOT support `INSERT OR IGNORE`
 
@@ -83,22 +122,21 @@ and double row counts.
 
 | File | Purpose | Notes |
 |------|---------|----------|
-| `src/lib.rs` | App bootstrap: manage shared state, register commands, spawn both loops | — |
-| `src/data.rs` | Data loop: git scan + ETL → builds `AllStats` into `SharedStats` | first-paint prefill from gold |
-| `src/usage_store.rs` | DuckDB medallion ETL (bronze/silver/gold) + serving queries + `.sql` template loader | schema v6; `INSERT OR IGNORE` not Appender (BUG-004); SQL from templates with user override in `~/.config/loc-dock/sql/` |
+| `src/lib.rs` | App bootstrap: manage shared state, register commands, spawn both loops | single-instance guard (PID lockfile + plugin); shared DuckDB connection opened here; config as `Arc<RwLock<>>` |
+| `src/data.rs` | Data loop: git scan + ETL → builds `AllStats` into `SharedStats` | first-paint prefill from gold; config cloned once at spawn |
+| `src/usage_store.rs` | DuckDB medallion ETL (bronze/silver/gold) + serving queries + `.sql` template loader | schema v6; `INSERT OR IGNORE` not Appender (BUG-004); SQL from templates with user override in `~/.config/loc-dock/sql/`; retry loop with WAL cleanup on `Connection::open` |
 | `loc-dock-tauri/src-tauri/sql/claude-silver.sql` | Claude silver extraction SQL template | user override: `~/.config/loc-dock/sql/claude-silver.sql` |
 | `loc-dock-tauri/src-tauri/sql/pi-silver.sql` | Pi silver extraction SQL template | user override: `~/.config/loc-dock/sql/pi-silver.sql` |
-| `src/git.rs` | Git log scanning + numstat parse | incremental since cached `latest_ts` |
-| `src/git_cache.rs` | Per-repo SHA/ts cache (DuckDB-backed) | skips unchanged repos |
-| `src/summary.rs` | Independent loop: commit collection + LLM summary → `SharedSummary` | own git/LLM work; never blocks data loop |
+| `src/git.rs` | Git log scanning + numstat parse | stateless — runs `git log --after=` on all repos every cycle |
+| `src/summary.rs` | Independent loop: commit collection + LLM summary → `SharedSummary` | own git/LLM work; `summaries` table lives in `usage_cache.db`; re-reads config each cycle via `read_config()` closure |
 | `src/pricing.rs` | `Pricing` struct loaded from `pricing.yaml` (per-Mtok cost) | externalized; user edits without recompile; creates default if absent |
 | `src/task_queue.rs` | Active-task tracking for the UI (`get_active_tasks`) | — |
 | `src/job_log.rs` | Job-run logging (`get_job_logs` / `clear_job_logs`) | — |
 | `src/time_utils.rs` | Day/week boundary math | — |
 | `src/types.rs` | `AllStats`, `RangeStats` structs | — |
-| `src/commands.rs` | Async Tauri command handlers (read shared state only) | non-blocking |
-| `src/config.rs` | `.env` settings load | `LOCDOCK_*` |
-| `src/theme.rs` | YAML theme load | — |
+| `src/commands.rs` | Async Tauri command handlers (read shared state only) | non-blocking; `restart_app` is a no-op (settings hot-reload); `save_settings` reloads config into `Arc<RwLock<>>` |
+| `src/config.rs` | `.env` settings load + settings.json persistence | `LOCDOCK_*` |
+| `src/theme.rs` | YAML theme load | uses `serde_yaml::Deserializer` for multi-document support |
 | `src/tray.rs` | System tray | — |
 
 ## Quick Reference

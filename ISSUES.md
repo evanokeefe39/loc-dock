@@ -17,6 +17,23 @@ Installers are unsigned. Windows SmartScreen and macOS Gatekeeper warn on first 
 
 ## Resolved
 
+### #8 — Second instance crashes on startup ("/restart kills tauri dev")
+Two related bugs. (1) No single-instance guard: launching a second `loc-dock.exe` hit a
+DuckDB file lock panic (`expect()` at usage_store.rs:121). (2) `app.restart()` under
+`npm run tauri dev` killed the dev watcher, leaving an orphaned process.
+
+Fixes (PR #14):
+- **PID lock file** (`instance.lock`) + `tasklist` check — detects old instances even
+  when they predate `tauri-plugin-single-instance`
+- **Retry loop** — `open_usage_cache()` retries `Connection::open` 5× with backoff +
+  stale `.wal`/`.tmp` cleanup
+- **Shared DuckDB connection** — both loops get a `try_clone()` of one `Connection`
+  opened in `lib.rs`, eliminating file-lock conflicts
+- **`restart_app` → no-op** — config changed to `Arc<RwLock<Config>>`; save writes to
+  disk + reloads shared state without restarting
+- **Graceful `exit()`** — `expect()` replaced with `eprintln!` + `std::process::exit(1)`
+  as last-resort safety net
+
 ### #6 — Config-driven ETL: externalize pricing + SQL transformations
 Pricing constants (input/output/cache per-million-token costs) moved from `pricing.rs` into `pricing.yaml` in the config dir. Silver extraction SQL (claude-silver.sql, pi-silver.sql) moved into user-overridable template files in `~/.config/loc-dock/sql/`. Users can edit these files without recompiling when:
   - Provider pricing changes (edit pricing.yaml)

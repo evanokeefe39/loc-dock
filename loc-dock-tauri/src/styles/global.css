@@ -623,28 +623,6 @@ html, body {
 /* ── Data Sources ── */
 .settings-section-heading {
 }
-.settings-add-source-btn {
-  background: var(--loc-add);
-  color: var(--bg);
-  border: none;
-  padding: 2px 8px;
-  border-radius: 3px;
-  cursor: pointer;
-  font-size: var(--font-xs);
-  -webkit-app-region: no-drag;
-}
-.settings-add-source-btn:disabled { opacity: 0.4; cursor: default; }
-
-.settings-data-section-note {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin: 4px 0;
-}
-
-.settings-data-section-note .settings-data-section-label {
-  font-size: var(--font-xs);
-  color: var(--text-dim);
 }
 
 .settings-data-divider {
@@ -701,27 +679,54 @@ html, body {
 .settings-source-card {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
+  gap: 10px;
+  padding: 10px 12px;
   border: 1px solid var(--border);
-  border-radius: 6px;
-  min-width: 180px;
+  border-radius: 8px;
+  min-width: 170px;
   flex: 1 0 auto;
+  cursor: default;
+}
+.settings-source-card.settings-add-card {
+  cursor: pointer;
+  border-style: dashed;
+  justify-content: center;
+  gap: 6px;
+  color: var(--text-dim);
+}
+.settings-source-card.settings-add-card:hover {
+  border-color: var(--text-dim);
+  color: var(--text);
+}
+.settings-source-add-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: 1px dashed var(--text-dim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 .settings-source-icon {
-  width: 32px;
-  height: 32px;
-  border-radius: 6px;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
 }
-.settings-source-icon.pi { background: #6366f1; color: #fff; }
-.settings-source-icon.claude { background: #d97706; color: #fff; }
-.settings-source-icon.codex { background: #059669; color: #fff; }
-.settings-source-card-name {
+.settings-source-icon.pi { background: #6366f1; }
+.settings-source-icon.claude { background: #d97706; }
+.settings-source-icon.codex { background: #10a37f; }
+.settings-source-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
   flex: 1;
+}
+.settings-source-card-name {
   font-size: var(--font-sm);
   font-weight: 500;
   overflow: hidden;
@@ -731,7 +736,6 @@ html, body {
 .settings-source-card-actions {
   display: flex;
   gap: 2px;
-  flex-shrink: 0;
 }
 .settings-card-btn {
   background: none;

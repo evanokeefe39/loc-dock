@@ -270,7 +270,7 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
             let total_ms = cycle_start.elapsed().as_millis();
             info!("Refreshed in {}ms (git:{}ms new:{} etl:{} entries)", total_ms, git_ms, new_commit_count, total_new);
             job_log::log_ok("data", &format!("{}ms git:{}ms", total_ms, git_ms));
-            crate::summary::perf_log_from(&config_dir, &format!("{}ms cycle", total_ms));
+            crate::job_log::log_ok("perf", &format!("{}ms cycle", total_ms));
 
             std::thread::sleep(std::time::Duration::from_secs(refresh_interval.max(10)));
         }

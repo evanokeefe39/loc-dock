@@ -39,9 +39,10 @@ pub async fn get_summary(app: AppHandle) -> SummaryData {
 }
 
 #[tauri::command]
-pub async fn get_settings() -> Settings {
-    let config = Config::load();
-    config.settings
+pub async fn get_settings(app: AppHandle) -> Settings {
+    let config = app.state::<Arc<RwLock<Config>>>().inner().clone();
+    let settings = config.read().map(|c| c.settings.clone()).unwrap_or_default();
+    settings
 }
 
 #[tauri::command]

@@ -1,6 +1,6 @@
 use crate::git::GitCommit;
 use crate::pricing::Pricing;
-use crate::source_adapter::{FileDiscoverer, SourceKind, SourceManager};
+use crate::source_adapter::{GlobFileDiscoverer, SourceKind, SourceManager};
 use crate::types::{CostBreakdown, SourceStats, TokenTotals};
 use chrono::{DateTime, Utc};
 use duckdb::Connection;
@@ -292,7 +292,7 @@ impl UsageStore {
 
         for pair in &self.source_manager.pairs {
             if pair.1.name() == name {
-                let n = process_source(&self.con, &*pair.0, pair.1, cutoff, &self.pricing, &self.sql_templates)?;
+                let n = process_source(&self.con, &pair.0, pair.1, cutoff, &self.pricing, &self.sql_templates)?;
                 self.initialized = true;
                 return Ok(n);
             }
@@ -350,7 +350,7 @@ impl UsageStore {
 /// — globbing in DuckDB would read full history (Spike 4 memory regression).
 fn process_source(
     con: &Connection,
-    discoverer: &dyn FileDiscoverer,
+    discoverer: &GlobFileDiscoverer,
     kind: SourceKind,
     cutoff: f64,
     pricing: &Pricing,

@@ -14,6 +14,35 @@ use log::{info, warn};
 use std::sync::{Arc, RwLock};
 use tauri::{AppHandle, Emitter, Manager};
 
+/// UTC boundary values shared between prefill and the main loop body.
+struct UtcBounds {
+    now_utc: DateTime<Utc>,
+    day_lo: f64, week_lo: f64, month_lo: f64, year_lo: f64,
+    hi: f64,
+    day_utc_str: String, week_utc_str: String,
+    month_utc_str: String, year_utc_str: String,
+}
+
+fn compute_utc_bounds() -> UtcBounds {
+    let now_utc = Utc::now();
+    let day_s = now_utc.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
+    let week_s = day_s - Duration::days(day_s.weekday().num_days_from_monday() as i64);
+    let month_s = now_utc.date_naive().with_day(1).unwrap().and_hms_opt(0, 0, 0).unwrap().and_utc();
+    let year_s = now_utc.date_naive().with_month(1).unwrap().with_day(1).unwrap().and_hms_opt(0, 0, 0).unwrap().and_utc();
+    UtcBounds {
+        now_utc,
+        day_lo:   day_s.timestamp() as f64,
+        week_lo:  week_s.timestamp() as f64,
+        month_lo: month_s.timestamp() as f64,
+        year_lo:  year_s.timestamp() as f64,
+        hi:       now_utc.timestamp() as f64,
+        day_utc_str:   day_s.format("%Y-%m-%d %H:%M:%S").to_string(),
+        week_utc_str:  week_s.format("%Y-%m-%d %H:%M:%S").to_string(),
+        month_utc_str: month_s.format("%Y-%m-%d %H:%M:%S").to_string(),
+        year_utc_str:  year_s.format("%Y-%m-%d %H:%M:%S").to_string(),
+    }
+}
+
 pub type SharedStats = Arc<RwLock<AllStats>>;
 
 pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: SharedStats, summary_state: SharedSummary, con: Connection) {
@@ -48,8 +77,8 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
             vec![],
         );
         let source_manager = SourceManager::with_discoverers(vec![
-            (Box::new(claude_discoverer), SourceKind::Claude),
-            (Box::new(pi_discoverer), SourceKind::Pi),
+            (claude_discoverer, SourceKind::Claude),
+            (pi_discoverer, SourceKind::Pi),
         ]);
         let mut store = UsageStore::new(source_manager, &usage_cache_dir, pricing, &config_dir, con);
         let queue = app.state::<TaskQueue>();
@@ -57,27 +86,12 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
         // ── Pre-fill SharedStats from daily_aggregates + commit_stats (<50ms first paint) ──
         // Prefill all four ranges — queries against daily_aggregates / commit_stats are fast (<5ms).
         {
-            let now_utc = Utc::now();
-            let day_s_utc = now_utc.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
-            let week_s_utc = day_s_utc
-                - Duration::days(day_s_utc.weekday().num_days_from_monday() as i64);
-            let month_s_utc = now_utc.date_naive().with_day(1).unwrap().and_hms_opt(0, 0, 0).unwrap().and_utc();
-            let year_s_utc = now_utc.date_naive().with_month(1).unwrap().with_day(1).unwrap().and_hms_opt(0, 0, 0).unwrap().and_utc();
-            let hi = now_utc.timestamp() as f64;
-            let day_lo = day_s_utc.timestamp() as f64;
-            let week_lo = week_s_utc.timestamp() as f64;
-            let month_lo = month_s_utc.timestamp() as f64;
-            let year_lo = year_s_utc.timestamp() as f64;
-            let day_utc_str = day_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
-            let week_utc_str = week_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
-            let month_utc_str = month_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
-            let year_utc_str = year_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
+            let b = compute_utc_bounds();
 
-            // Prefill all four ranges from daily_aggregates — O(days), not O(git log).
-            let day   = build_one_range(&store, &now_utc.with_timezone(&tz), &now_utc.with_timezone(&tz), day_lo,   hi, &day_utc_str,   &day_utc_str,   7, "day");
-            let week  = build_one_range(&store, &now_utc.with_timezone(&tz), &now_utc.with_timezone(&tz), week_lo,  hi, &week_utc_str,  &week_utc_str,  7, "week");
-            let month = build_one_range(&store, &now_utc.with_timezone(&tz), &now_utc.with_timezone(&tz), month_lo, hi, &month_utc_str, &month_utc_str, 7, "month");
-            let year  = build_one_range(&store, &now_utc.with_timezone(&tz), &now_utc.with_timezone(&tz), year_lo,  hi, &year_utc_str,  &year_utc_str,  7, "year");
+            let day   = build_one_range(&store, &b.now_utc.with_timezone(&tz), &b.now_utc.with_timezone(&tz), b.day_lo,   b.hi, &b.day_utc_str,   &b.day_utc_str,   7, "day");
+            let week  = build_one_range(&store, &b.now_utc.with_timezone(&tz), &b.now_utc.with_timezone(&tz), b.week_lo,  b.hi, &b.week_utc_str,  &b.week_utc_str,  7, "week");
+            let month = build_one_range(&store, &b.now_utc.with_timezone(&tz), &b.now_utc.with_timezone(&tz), b.month_lo, b.hi, &b.month_utc_str, &b.month_utc_str, 7, "month");
+            let year  = build_one_range(&store, &b.now_utc.with_timezone(&tz), &b.now_utc.with_timezone(&tz), b.year_lo,  b.hi, &b.year_utc_str,  &b.year_utc_str,  7, "year");
 
             let prefilled = AllStats {
                 ready: store.is_initialized(),
@@ -113,23 +127,10 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
                 let _ = app.emit("tasks-changed", ());
             }
 
-            // ── UTC midnight boundaries for all SQL queries ──
-            // day_start_hour/timezone only affect frontend labels, never query filters.
-            let now_utc = Utc::now();
-            let day_s_utc = now_utc.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
-            let week_s_utc = day_s_utc
-                - Duration::days(day_s_utc.weekday().num_days_from_monday() as i64);
-            let month_s_utc = now_utc.date_naive().with_day(1).unwrap().and_hms_opt(0, 0, 0).unwrap().and_utc();
-            let year_s_utc = now_utc.date_naive().with_month(1).unwrap().with_day(1).unwrap().and_hms_opt(0, 0, 0).unwrap().and_utc();
-            let day_lo = day_s_utc.timestamp() as f64;
-            let week_lo = week_s_utc.timestamp() as f64;
-            let month_lo = month_s_utc.timestamp() as f64;
-            let year_lo = year_s_utc.timestamp() as f64;
-            let hi = now_utc.timestamp() as f64;
-            let day_utc_str = day_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
-            let week_utc_str = week_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
-            let month_utc_str = month_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
-            let year_utc_str = year_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
+            let b = compute_utc_bounds();
+            let now_utc = b.now_utc;
+            let (day_utc_str, week_utc_str, month_utc_str, year_utc_str) = (&b.day_utc_str, &b.week_utc_str, &b.month_utc_str, &b.year_utc_str);
+            let (day_lo, week_lo, month_lo, year_lo, hi) = (b.day_lo, b.week_lo, b.month_lo, b.year_lo, b.hi);
 
             // ── Emit summary state while git scan runs ──
             // On cold start no cached data → emit loading ("Summaries are being generated...")

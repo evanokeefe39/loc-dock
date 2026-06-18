@@ -4,8 +4,6 @@ use std::time::SystemTime;
 // ── Source kinds ───────────────────────────────────────────────────────────
 
 /// Identifies which silver-layer extraction SQL applies to a source's files.
-/// V2: parsing/cost moved into DuckDB SQL — Rust only discovers files and tags
-/// them with the kind so `usage_store` can pick the right `INSERT ... SELECT`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKind {
     Claude,
@@ -21,16 +19,7 @@ impl SourceKind {
     }
 }
 
-// ── File discovery trait ───────────────────────────────────────────────────
-
-/// Discovers session files on disk.
-pub trait FileDiscoverer: Send {
-    /// Find all session files newer than `cutoff` (unix epoch seconds).
-    /// Returns (file_paths, max_mtime_seen).
-    fn discover_files(&self, cutoff: f64) -> Result<(Vec<PathBuf>, f64), String>;
-}
-
-// ── Shared glob-based file discoverer ──────────────────────────────────────
+// ── Glob-based file discoverer ────────────────────────────────────────────
 
 pub struct GlobFileDiscoverer {
     root_dir: PathBuf,
@@ -45,10 +34,10 @@ impl GlobFileDiscoverer {
         let glob_pattern = pattern.to_string_lossy().replace('\\', "/");
         Self { root_dir, glob_pattern, skip_subdirs }
     }
-}
 
-impl FileDiscoverer for GlobFileDiscoverer {
-    fn discover_files(&self, cutoff: f64) -> Result<(Vec<PathBuf>, f64), String> {
+    /// Find all session files newer than `cutoff` (unix epoch seconds).
+    /// Returns (file_paths, max_mtime_seen).
+    pub fn discover_files(&self, cutoff: f64) -> Result<(Vec<PathBuf>, f64), String> {
         let mut files = Vec::new();
         let mut max_mtime = 0.0;
 
@@ -72,8 +61,6 @@ impl FileDiscoverer for GlobFileDiscoverer {
                 max_mtime = mtime;
             }
             if mtime >= cutoff {
-                // Edge case (inventory): exclude subagent logs — they duplicate
-                // parent-session usage and would double-count.
                 if self.skip_subdirs.iter().any(|dir| {
                     p.components().any(|c| c.as_os_str() == dir.as_str())
                 }) {
@@ -87,15 +74,15 @@ impl FileDiscoverer for GlobFileDiscoverer {
     }
 }
 
-// ── SourceManager: pairs a discoverer with its source kind ─────────────────
+// ── Source manager: pairs a discoverer with its source kind ─────────────────
 
 pub struct SourceManager {
-    pub pairs: Vec<(Box<dyn FileDiscoverer>, SourceKind)>,
+    pub pairs: Vec<(GlobFileDiscoverer, SourceKind)>,
 }
 
 impl SourceManager {
     pub fn with_discoverers(
-        pairs: Vec<(Box<dyn FileDiscoverer>, SourceKind)>,
+        pairs: Vec<(GlobFileDiscoverer, SourceKind)>,
     ) -> Self {
         Self { pairs }
     }

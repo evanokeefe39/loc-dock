@@ -10,7 +10,169 @@ SOURCE ──► DuckDB table ──► Rust struct ──► Tauri IPC ──�
 
 ---
 
+## Medallion Architecture Overview
+
+```mermaid
+flowchart TD
+    subgraph Sources["Source Files (immutable logs)"]
+        JSONL["Claude / Pi JSONL\n~/.claude/**/*.jsonl\n~/.pi/agent/sessions/*.jsonl"]
+        GIT["Git repos\nrepos_dir/*/.git"]
+    end
+
+    subgraph Bronze["Bronze — Raw Landing"]
+        BRONZE_CTE["read_ndjson_objects CTE\nephemeral per batch\nno schema inference\nraw JSON per line"]
+    end
+
+    subgraph Silver["Silver — Cleaned & Typed"]
+        ENTRIES["entries table\nUNIQUE(source, session_id, ts)\nfields by JSON path\ncost flat-priced\ndeduped ON CONFLICT"]
+        COMMIT_STATS["commit_stats table\nUNIQUE(repo, sha)\nincremental git log\nper-commit LOC counts"]
+    end
+
+    subgraph Gold["Gold — Serving Aggregates"]
+        DAILY_AGG["daily_aggregates table\nper-date, per-source rollup\nSUM tokens, cost, sessions, LOC\nrefreshed when rows grow"]
+        SUMMARY_CACHE["repo_summaries table\ncached LLM highlights\nkeyed by repo_path\ncompared to head_sha"]
+    end
+
+    subgraph Serving["Rust Serving Queries"]
+        QUERIES["usage_store.rs\nquery_aggregates()\nquery_cost_buckets()\nquery_commit_buckets()\ncount_sessions()\nbuild_one_range()"]
+        SUMMARY_BUILD["build_summary_data()\nall_repos_with_commits\n+ all_summarized_repos" ]
+    end
+
+    subgraph Shared["Shared In-Memory State"]
+        ALLSTATS["AllStats\nArc&lt;RwLock&gt;"]
+        SUMMDATA["SummaryData\nArc&lt;RwLock&gt;"]
+    end
+
+    subgraph Frontend["React Frontend"]
+        TQ["TanStack Query\nuseStatsQuery\nuseSummaryQuery"]
+        ZS["Zustand store\nrange / mode / panels"]
+        UI["TopRow · Chart · BottomRow\nSummaryPanel · SettingsPanel"]
+    end
+
+    JSONL -->|ingested_files\nregistry filter| BRONZE_CTE
+    BRONZE_CTE -->|INSERT...SELECT\nper-source SQL templates| ENTRIES
+    ENTRIES -->|finalize_etl()\nrefresh_aggregates| DAILY_AGG
+
+    GIT -->|git log --after\ncollect_new_commits| COMMIT_STATS
+    COMMIT_STATS -->|head_sha check\nchange detection| SUMMARY_CACHE
+
+    DAILY_AGG -->|query_aggregates\nadditive measures| QUERIES
+    ENTRIES -->|query_cost_buckets\nnon-additive measures| QUERIES
+    COMMIT_STATS -->|query_commit_buckets| QUERIES
+    SUMMARY_CACHE ---> SUMMARY_BUILD
+
+    QUERIES -->|build_all_stats ×4\nday/week/month/year| ALLSTATS
+    SUMMARY_BUILD -->|Tauri event\n+ shared state| SUMMDATA
+
+    ALLSTATS -->|get_stats command| TQ
+    SUMMDATA -->|get_summary command\n+ summary-update event| TQ
+    TQ ---> UI
+    ZS ---> UI
+
+    style Bronze fill:#CD7F32,color:#000
+    style Silver fill:#C0C0C0,color:#000
+    style Gold fill:#FFD700,color:#000
+    style Sources fill:#333,color:#fff
+    style Shared fill:#444,color:#fff
+    style Frontend fill:#2d3748,color:#fff
+```
+
+### Layer contracts
+
+| Layer | Table/CTE | What it stores | How it's populated | How it's read |
+|-------|-----------|----------------|--------------------|---------------|
+| **Bronze** | `read_ndjson_objects` (CTE) | Raw JSON per line, no schema | DuckDB glob of JSONL files on each batch | Silver `INSERT...SELECT` extracts by path |
+| **Silver** | `entries` | Typed rows: source, session_id, ts, tokens, cost (all fields) | `INSERT...SELECT` per-source SQL templates, deduped | Gold aggregates; serving queries for buckets & sessions |
+| **Silver** | `commit_stats` | Per-commit: repo, sha, ts, msg, added, deleted | Rust parses `git log --numstat`, inserts with ON CONFLICT DO NOTHING | Bucket queries for git timeline; latest_commit_ts for incremental scan |
+| **Gold** | `daily_aggregates` | Per-date, per-source: SUM(tokens), SUM(cost), SUM(LOC), session_count | `refresh_aggregates()`: INSERT OR REPLACE ... SELECT | `query_aggregates()` for totals; prefill on startup |
+| **Gold** | `repo_summaries` | Cached LLM highlights per repo: sha, json, model, timestamp | `save_repo_summary()` after LLM response | `build_summary_data()` for SummaryPanel |
+
+---
+
 ## 1. Usage Data Flow (JSONL → Cost / Tokens / Sessions)
+
+```mermaid
+flowchart TD
+    subgraph Sources["Source Files"]
+        CLAUDE_JSONL["Claude Code\n~/.claude/projects/**/*.jsonl"]
+        PI_JSONL["Pi\n~/.pi/agent/sessions/*.jsonl"]
+    end
+
+    subgraph Discovery["File Discovery"]
+        SM["SourceManager\nGlobFileDiscoverer"]
+        REGISTRY["ingested_files\n(mtime, size) check\nskip unchanged"]
+    end
+
+    subgraph Bronze_
+        BRONZE["read_ndjson_objects\nephemeral CTE\nraw JSON per line\nignore_errors=true"]
+    end
+
+    subgraph Silver_
+        ENTRIES["INSERT INTO entries\nsource · session_id · ts\nmodel · input_tokens\noutput_tokens\ncache tokens\ninput_cost · output_cost\ncache_write_cost\ncache_read_cost\ntotal_cost · file_path\n\nUNIQUE(source, session_id, ts)"]
+    end
+
+    subgraph Gold_
+        DAILY["INSERT OR REPLACE\nINTO daily_aggregates\ndate · source\nSUM(input_tokens)\nSUM(output_tokens)\nSUM(total_cost)\nCOUNT(DISTINCT session_id)\n\nUNIQUE(date, source)"]
+        RETENTION["DELETE entries/daily_agg\nWHERE ts < RETENTION_DAYS"]
+    end
+
+    subgraph Serving_["Serving Queries (usage_store.rs)"]
+        Q_AGG["query_aggregates()\nSELECT SUM(cost), SUM(tokens)\nFROM daily_aggregates\n→ (cost, breakdown, tokens, sessions)"]
+        Q_COST["query_cost_buckets()\nFROM entries\nbucketed timeline\n→ Vec&lt;f64&gt;"]
+        Q_TOKENS["query_token_buckets()\nFROM entries\nbucketed timeline\n→ Vec&lt;(i64,i64,i64,i64)&gt;"]
+        Q_SESSIONS["count_sessions()\nCOUNT(DISTINCT session_id)\nFILTER(WHERE ts >= active)\n→ (total, active)"]
+        Q_SRC["query_aggregate_\nsource_breakdown()\nGROUP BY source\n→ Vec&lt;SourceStats&gt;"]
+    end
+
+    subgraph Build_
+        ONE_RANGE["build_one_range()\ncalls all 5 queries\npacks RangeResult {stats,\ngit_buckets, cost_buckets,\ntoken_buckets, labels}"]
+        ALL_STATS["build_all_stats()\ncalls build_one_range ×4\nday / week / month / year\npacks AllStats"]
+    end
+
+    subgraph Shared_
+        SS["SharedStats\nArc&lt;RwLock&lt;AllStats&gt;&gt;\nwritten by data loop\nread by get_stats"]
+    end
+
+    subgraph Front_
+        TQ_["TanStack Query\nuseStatsQuery()\npoll invoke(get_stats)\nevery 10s"]
+        COMP["Chart · TopRow · BottomRow\nreads stats[range]\nrenders via Canvas 2D"]
+    end
+
+    CLAUDE_JSONL --> SM
+    PI_JSONL --> SM
+    SM -->|process_source_named| REGISTRY
+    REGISTRY -->|only changed files| BRONZE
+    BRONZE -->|INSERT...SELECT\nper-source SQL template| ENTRIES
+    ENTRIES -->|finalize_etl| DAILY
+    DAILY --> RETENTION
+
+    DAILY --> Q_AGG
+    DAILY --> Q_SRC
+    ENTRIES --> Q_COST
+    ENTRIES --> Q_TOKENS
+    ENTRIES --> Q_SESSIONS
+
+    Q_AGG --> ONE_RANGE
+    Q_COST --> ONE_RANGE
+    Q_TOKENS --> ONE_RANGE
+    Q_SESSIONS --> ONE_RANGE
+    Q_SRC --> ONE_RANGE
+
+    ONE_RANGE -->|×4| ALL_STATS
+    ALL_STATS -->|write| SS
+    SS -->|get_stats command| TQ_
+    TQ_ -->|data + isLoading| COMP
+
+    style Bronze_ fill:#CD7F32,color:#000
+    style Silver_ fill:#C0C0C0,color:#000
+    style Gold_ fill:#FFD700,color:#000
+    style Serving_ fill:#556,color:#fff
+    style Build_ fill:#445,color:#fff
+    style Shared_ fill:#334,color:#fff
+    style Front_ fill:#2d3748,color:#fff
+```
+
+**Detailed path:**
 
 ```
 ~/.claude/projects/**/*.jsonl   ◄── Claude Code writes session logs here
@@ -101,39 +263,56 @@ SOURCE ──► DuckDB table ──► Rust struct ──► Tauri IPC ──�
 
 ## 2. Git Data Flow (Repos → LOC / Commits)
 
+```mermaid
+flowchart TD
+    subgraph Sources_["Git Repos"]
+        REPO["repos_dir/*/.git\nuser repos"]
+    end
+
+    subgraph Scan["Incremental Scan (data.rs)"]
+        LATEST["latest_commit_ts()\nSELECT MAX(ts)\nFROM commit_stats"]
+        SCAN["collect_new_commits()\nfor each repo:\ngit log --after={ts} --numstat\nparse tab-separated output"]
+        DECIDE{"empty?"}
+    end
+
+    subgraph Insert_
+        INSERT["insert_commits(repo, commits)\nINSERT INTO commit_stats\n(repo, sha, ts, msg,\n added, deleted, file_ct)\nON CONFLICT DO NOTHING"]
+        CS["commit_stats table\nper-commit rows\npersisted across restarts"]
+    end
+
+    subgraph Query_["Git Serving Queries"]
+        QBUCK["query_commit_buckets()\nSELECT SUM(added), SUM(deleted)\nFLOOR((ts-lo)/span*n) AS bucket\nGROUP BY bucket\nORDER BY bucket\n→ Vec&lt;(i64,i64)&gt;"]
+        QTOT["query_commit_totals()\nSELECT SUM(added), SUM(deleted)\nFROM commit_stats\nWHERE ts >= ?::TIMESTAMP\n→ (loc_added, loc_deleted)"]
+    end
+
+    subgraph Merge_
+        ONER["build_one_range()\nmerges git + usage data\n→ RangeResult"]
+    end
+
+    REPO --> SCAN
+    CS --> LATEST
+    LATEST --> DECIDE
+    DECIDE -->|empty →| SCAN
+    DECIDE -->|has ts →| SCAN
+    SCAN -->|Vec&lt;RepoCommits&gt;| INSERT
+    INSERT --> CS
+    CS --> QBUCK
+    CS --> QTOT
+    QBUCK --> ONER
+    QTOT --> ONER
+    ONER -->|into AllStats| SHARED
+
+    subgraph SHARED["SharedStats (Arc&lt;RwLock&gt;)"]
+    end
+
+    style Sources_ fill:#333,color:#fff
+    style Scan fill:#445,color:#fff
+    style Insert_ fill:#C0C0C0,color:#000
+    style Query_ fill:#556,color:#fff
+    style Merge_ fill:#445,color:#fff
 ```
-repos_dir/*/.git                  ◄── user's git repositories
-        │
-        │  incremental scan:
-        │  latest_commit_ts() → MAX(ts) FROM commit_stats
-        │  if empty → use git_history_days (default 200)
-        │
-        ▼
-  collect_new_commits(repos_dir, since_iso)
-  ├── for each repo dir: git log --after={since_iso} --numstat
-  │   parses git's tab-separated numstat output
-  └── returns Vec<RepoCommits>  (repo, head_sha, Vec<GitCommit>)
-        │
-        ▼
-  insert_commits(repo, commits, head_sha)
-  ├── INSERT INTO commit_stats (repo, sha, ts, msg, added, deleted, file_ct)
-  │     ON CONFLICT (repo, sha) DO NOTHING
-  └── commit_stats stores per-commit rows with LOC counts
-        │
-        ▼
-  Serving queries (usage_store.rs):
-  ├── query_commit_buckets(lo, hi, n_buckets)
-  │     SELECT SUM(added), SUM(deleted) bucketed by ts
-  │     → Vec<(i64,i64)>  per-bucket (added, deleted)
-  │
-  └── query_commit_totals(since_str)
-        SELECT SUM(added), SUM(deleted) FROM commit_stats WHERE ts >= ?
-        → (loc_added, loc_deleted)
-             │
-             ▼
-  Included in build_one_range → build_all_stats → SharedStats
-  (same path as usage data, merged into AllStats)
-```
+
+**Detailed path:**
 
 **Key properties:**
 - **Incremental** — past commits are never re-scanned, only `git log --after=` the latest known timestamp
@@ -257,97 +436,155 @@ repos_dir/*/.git                  ◄── user's git repositories
 
 ## 5. Frontend Data Flow (Tauri IPC → Pixels)
 
-```
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  TanStack Query Client  (src/hooks/queries.ts)                   │
-  │                                                                  │
-  │  useStatsQuery():                                                │
-  │    queryKey: ["stats"]                                           │
-  │    queryFn: invoke<AllStats>("get_stats")                        │
-  │    refetchInterval: 10_000                                       │
-  │    → { data: AllStats | undefined, isLoading, isFetching }       │
-  │                                                                  │
-  │  useSummaryQuery():                                              │
-  │    queryKey: ["summary"]                                         │
-  │    queryFn: invoke<SummaryData>("get_summary")                   │
-  │    refetchInterval: 10_000                                       │
-  │    + event listener "summary-update" → setQueryData              │
-  │    initialData: DEFAULT_SUMMARY                                  │
-  │    → { data: SummaryData, isLoading, ... }                       │
-  │                                                                  │
-  │  useThemeQuery():                                                │
-  │    queryKey: ["theme"]                                           │
-  │    queryFn: invoke<Theme>("get_theme")                           │
-  │    staleTime: Infinity  (one-time fetch)                         │
-  │    → { data: Theme | undefined, ... }                            │
-  └───────────────────┬──────────────────────────────────────────────┘
-                      │
-                      ▼
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  Zustand Store  (src/lib/store.ts)                               │
-  │                                                                  │
-  │  State:         Toggles:                                         │
-  │    range        toggleRange()   day↔week↔month↔year              │
-  │    mode         toggleMode()    loc↔cost↔tokens                  │
-  │    settingsOpen setSettingsOpen(bool)                            │
-  │    summaryOpen  setSummaryOpen(bool)                             │
-  │    tooltipVisible                                                │
-  │    hideNoPrs                                                     │
-  │                                                                  │
-  │  No provider — any component calls useUIStore() directly         │
-  └───────────────────┬──────────────────────────────────────────────┘
-                      │
-                      ▼
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  App.tsx                                                         │
-  │                                                                  │
-  │  const { data: stats, isLoading } = useStatsQuery()              │
-  │  const { data: summary } = useSummaryQuery()                     │
-  │  const { data: theme } = useThemeQuery()                         │
-  │  const { range, mode, ... } = useUIStore()                       │
-  │                                                                  │
-  │  currentStats = stats?.[range] ?? null                           │
-  │  ready = !isLoading                                              │
-  └───────┬───────────────┬──────────────┬───────────────────────────┘
-          │               │              │
-          ▼               ▼              ▼
-  TopRow              Chart           BottomRow
-  props:              props:          props:
-  stats=currentStats  stats=stats?    tokens=currentStats?.tokens
-  ready=!isLoading    mode=mode       (null when loading → "--")
-  range=range         range=range
-  mode=mode           theme=theme??
-                      │
-                      ▼
-              Canvas 2D drawing
-              (chart.ts):
-              drawLocChart()
-              drawCostChart()
-              drawTokenChart()
+```mermaid
+flowchart TD
+    subgraph Duck["DuckDB (on disk)"]
+        DA["daily_aggregates\nSUM(cost, tokens, LOC)\nper date × source"]
+        ENT["entries\nraw session rows\nnon-additive queries"]
+        CS["commit_stats\ngit LOC per commit"]
+        RS["repo_summaries\ncached LLM highlights"]
+    end
+
+    subgraph Rust_["Rust Backend"]
+        ALLSTATS["SharedStats\nArc&lt;RwLock&lt;AllStats&gt;&gt;"]
+        SUMM["SharedSummary\nArc&lt;RwLock&lt;SummaryData&gt;&gt;"]
+        THEME["Tauri State\n&lt;Theme&gt;"]
+        DL["Data loop\nbuilds AllStats\n+ SummaryData"]
+    end
+
+    subgraph Commands_["Tauri Commands (commands.rs)"]
+        GET_S["get_stats()\nread SharedStats\n→ AllStats"]
+        GET_SUM["get_summary()\nread SharedSummary\n→ SummaryData"]
+        GET_T["get_theme()\nread Theme state\n→ Theme"]
+        GET_SET["get_settings()\nread Config\n→ Settings"]
+    end
+
+    subgraph TQ["TanStack Query Layer (src/hooks/queries.ts)"]
+        Q1["useStatsQuery()\nqueryKey: ['stats']\nrefetchInterval: 10s"]
+        Q2["useSummaryQuery()\nqueryKey: ['summary']\nrefetchInterval: 10s\n+ summary-update event"]
+        Q3["useThemeQuery()\nqueryKey: ['theme']\nstaleTime: Infinity"]
+    end
+
+    subgraph ZS["Zustand Store (src/lib/store.ts)"]
+        ZS1["range · mode\ntooltipVisible\nsettingsOpen\nsummaryOpen\nhideNoPrs"]
+    end
+
+    subgraph App_["App.tsx"]
+        A["currentStats = stats?.[range]\nready = !isLoading\ntheme = theme ?? DEFAULT"]
+    end
+
+    subgraph Components_["React Components"]
+        TR["TopRow\nprops: stats, ready\nshows LOC, cost, sessions"]
+        CH["Chart\nprops: stats, mode,\nrange, theme\nCanvas 2D draw*"]
+        BR["BottomRow\nprops: tokens\nshows IN/OUT/CW/CR"]
+        SP["SummaryPanel\nprops: summary, range\nrepo cards + highlights"]
+        CT["CostTooltip\nprops: breakdown\nhover cost detail"]
+    end
+
+    DA --> DL
+    ENT --> DL
+    CS --> DL
+    RS --> DL
+    DL --> ALLSTATS
+    DL --> SUMM
+
+    ALLSTATS ---->|read| GET_S
+    SUMM ---->|read| GET_SUM
+    THEME ---->|read| GET_T
+
+    GET_S -->|invoke("get_stats")| Q1
+    GET_SUM -->|invoke("get_summary")| Q2
+    GET_T -->|invoke("get_theme")| Q3
+
+    Q1 -->|data: AllStats, isLoading| A
+    Q2 -->|data: SummaryData| A
+    Q3 -->|data: Theme| A
+    ZS1 -->|range, mode| A
+
+    A -->|stats[range], ready| TR
+    A -->|stats, mode, range, theme| CH
+    A -->|stats[range].tokens| BR
+    A -->|summary| SP
+    A -->|stats[range].cost_breakdown| CT
+
+    style Duck fill:#FFF8DC,color:#000
+    style Rust_ fill:#444,color:#fff
+    style Commands_ fill:#555,color:#fff
+    style TQ fill:#FF4154,color:#fff
+    style ZS fill:#443E38,color:#fff
+    style App_ fill:#2d3748,color:#fff
+    style Components_ fill:#2d3748,color:#fff
 ```
 
-**First-paint timing (warm start with cached data):**
+### Polling lifecycle
 
-```
-  0ms    App mounts → TanStack Query fires invoke("get_stats")
-  0-5ms  Rust prefill already set SharedStats from daily_aggregates
-  5ms    First invoke returns → React renders Chart + TopRow with data
-  5-15s  Data loop git scan + ETL + aggregates refresh
-  15s+   TanStack Query refetch → new AllStats with latest data
+```mermaid
+sequenceDiagram
+    participant R as React App
+    participant TQ as TanStack Query
+    participant IPC as Tauri IPC
+    participant CMD as get_stats (Rust)
+    participant SS as SharedStats (RwLock)
+
+    Note over R,SS: Startup (warm start)
+    R->>TQ: useStatsQuery() mount
+    TQ->>IPC: invoke("get_stats")
+    IPC->>CMD: deserialize + execute
+    CMD->>SS: read()
+    SS-->>CMD: AllStats (prefilled from DB)
+    CMD-->>IPC: AllStats JSON
+    IPC-->>TQ: resolve
+    TQ-->>R: { data: AllStats, isLoading: false }
+    R->>R: render with data (first paint <50ms)
+
+    Note over R,SS: Every 10s background poll
+    TQ->>IPC: invoke("get_stats")
+    Note over R: stale data still visible
+    IPC->>CMD: execute
+    CMD->>SS: read()
+    SS-->>CMD: AllStats (updated by data loop)
+    CMD-->>IPC: AllStats JSON
+    IPC-->>TQ: resolve
+    TQ-->>R: { data: AllStats, isFetching: false }
+    R->>R: re-render with fresh data
+
+    Note over R,SS: Startup (cold start)
+    R->>TQ: useStatsQuery() mount
+    TQ-->>R: { data: undefined, isLoading: true }
+    R->>R: render spinner + "--"
+    TQ->>IPC: invoke("get_stats")
+    IPC->>CMD: execute
+    CMD->>SS: read()
+    SS-->>CMD: AllStats (ready: false, zeros)
+    CMD-->>IPC: AllStats JSON
+    IPC-->>TQ: resolve
+    TQ-->>R: { data: AllStats, isLoading: false }
+    R->>R: render spinner (ready=false)
+
+    Note over R,SS: ...data loop completes...
+    TQ->>IPC: invoke("get_stats") (10s poll)
+    CMD->>SS: read()
+    SS-->>CMD: AllStats (ready: true, real data)
+    CMD-->>IPC: AllStats JSON
+    IPC-->>TQ: resolve
+    TQ-->>R: { data: AllStats, isLoading: false }
+    R->>R: render real data
 ```
 
-**First-paint timing (cold start, no cached data):**
+### Query hooks API
 
-```
-  0ms    App mounts → isInitialized() = false → ready = false
-  0ms    Chart shows spinner, TopRow shows --
-  5-50ms Prefill completes with empty data
-  50ms   TanStack Query first invoke returns (ready=false)
-         → Chart keeps spinner, TopRow keeps --
-  5-15s  First data loop cycle: git scan + ETL + aggregates
-  15s+   TanStack Query refetch → AllStats with ready=true
-         → Chart draws data, TopRow shows real numbers
-```
+| Hook | Key | Polling | Event-driven | Used by |
+|------|-----|---------|-------------|---------|
+| `useStatsQuery()` | `['stats']` | 10s | — | TopRow, Chart, BottomRow, CostTooltip |
+| `useSummaryQuery()` | `['summary']` | 10s | `summary-update` event updates cache | SummaryPanel |
+| `useThemeQuery()` | `['theme']` | never (staleTime: Infinity) | — | Chart (colors), all via CSS variables |
+
+### Key properties
+
+- **Stale-while-revalidate** — during background refetches, the stale data stays visible. No flash.
+- **isLoading vs isFetching** — `isLoading` means no data yet (first fetch). `isFetching` means background refresh (stale data still displayed).
+- **No backend `ready` flag needed** — TanStack Query's `isLoading` replaces the `AllStats.ready` boolean for UI loading states.
+- **Event-driven summary updates** — the `summary-update` Tauri event calls `queryClient.setQueryData()` to push live summary data into the cache without waiting for the next poll.
 
 ---
 

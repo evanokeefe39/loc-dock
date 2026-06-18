@@ -61,25 +61,39 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
             let day_s_utc = now_utc.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
             let week_s_utc = day_s_utc
                 - Duration::days(day_s_utc.weekday().num_days_from_monday() as i64);
+            let month_s_utc = now_utc.date_naive().with_day(1).unwrap().and_hms_opt(0, 0, 0).unwrap().and_utc();
+            let year_s_utc = now_utc.date_naive().with_month(1).unwrap().with_day(1).unwrap().and_hms_opt(0, 0, 0).unwrap().and_utc();
 
             let day_date = day_s_utc.format("%Y-%m-%d").to_string();
             let week_date = week_s_utc.format("%Y-%m-%d").to_string();
+            let month_date = month_s_utc.format("%Y-%m-%d").to_string();
+            let year_date = year_s_utc.format("%Y-%m-%d").to_string();
             let day_utc_str = day_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
             let week_utc_str = week_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
+            let month_utc_str = month_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
+            let year_utc_str = year_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
 
             // ponytail: prefill both totals AND bucket arrays so the graph renders instantly.
             // Bucket queries are ~6ms each — negligible vs the 15s cycle.
             let hi = now_utc.timestamp() as f64;
             let day_lo = day_s_utc.timestamp() as f64;
             let week_lo = week_s_utc.timestamp() as f64;
+            let month_lo = month_s_utc.timestamp() as f64;
+            let year_lo = year_s_utc.timestamp() as f64;
 
             // Populate bucket arrays too so the graph shows data at paint time
             let git_buckets_day = store.query_commit_buckets(day_lo, hi);
             let git_buckets_week = store.query_commit_buckets(week_lo, hi);
+            let git_buckets_month = store.query_commit_buckets(month_lo, hi);
+            let git_buckets_year = store.query_commit_buckets(year_lo, hi);
             let cost_buckets_day = store.query_cost_buckets(day_lo, hi);
             let cost_buckets_week = store.query_cost_buckets(week_lo, hi);
+            let cost_buckets_month = store.query_cost_buckets(month_lo, hi);
+            let cost_buckets_year = store.query_cost_buckets(year_lo, hi);
             let token_buckets_day = store.query_token_buckets(day_lo, hi);
             let token_buckets_week = store.query_token_buckets(week_lo, hi);
+            let token_buckets_month = store.query_token_buckets(month_lo, hi);
+            let token_buckets_year = store.query_token_buckets(year_lo, hi);
 
             let build_range = |date: &str, utc_str: &str| -> RangeStats {
                 let (cost_total, cost_breakdown, tokens, sessions) = store.query_aggregates(date);
@@ -101,16 +115,18 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
                 ready: has_data,
                 day: build_range(&day_date, &day_utc_str),
                 week: build_range(&week_date, &week_utc_str),
-                git_buckets_day, git_buckets_week,
-                cost_buckets_day, cost_buckets_week,
-                token_buckets_day, token_buckets_week,
+                month: build_range(&month_date, &month_utc_str),
+                year: build_range(&year_date, &year_utc_str),
+                git_buckets_day, git_buckets_week, git_buckets_month, git_buckets_year,
+                cost_buckets_day, cost_buckets_week, cost_buckets_month, cost_buckets_year,
+                token_buckets_day, token_buckets_week, token_buckets_month, token_buckets_year,
                 ..Default::default()
             };
 
             if let Ok(mut s) = stats.write() {
                 *s = prefilled;
             }
-            info!("Prefilled day+week stats from daily_aggregates (first paint <50ms)");
+            info!("Prefilled stats from daily_aggregates (first paint <50ms)");
         }
 
         // Run first refresh immediately, then loop on interval
@@ -134,11 +150,17 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
             let day_s_utc = now_utc.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
             let week_s_utc = day_s_utc
                 - Duration::days(day_s_utc.weekday().num_days_from_monday() as i64);
+            let month_s_utc = now_utc.date_naive().with_day(1).unwrap().and_hms_opt(0, 0, 0).unwrap().and_utc();
+            let year_s_utc = now_utc.date_naive().with_month(1).unwrap().with_day(1).unwrap().and_hms_opt(0, 0, 0).unwrap().and_utc();
             let day_lo = day_s_utc.timestamp() as f64;
             let week_lo = week_s_utc.timestamp() as f64;
+            let month_lo = month_s_utc.timestamp() as f64;
+            let year_lo = year_s_utc.timestamp() as f64;
             let hi = now_utc.timestamp() as f64;
             let day_utc_str = day_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
             let week_utc_str = week_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
+            let month_utc_str = month_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
+            let year_utc_str = year_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
 
             // ── Emit summary state while git scan runs ──
             // On cold start no cached data → emit loading ("Summaries are being generated...")
@@ -163,6 +185,8 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
             let now_local = now_utc.with_timezone(&tz);
             let week_s_label = time_utils::week_start(&now_local, day_start_hour, week_start_day);
             let day_s_label = time_utils::day_start(&now_local, day_start_hour);
+            let month_s_label = time_utils::month_start(&now_local, day_start_hour);
+            let year_s_label = time_utils::year_start(&now_local, day_start_hour);
 
             // ── Incremental git scan ──
             // Query the latest commit timestamp in commit_stats, then scan only
@@ -196,9 +220,9 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
                 () => {
                     let s = build_all_stats(
                         &store,
-                        &day_s_label, &week_s_label, &now_local,
-                        day_lo, week_lo, hi,
-                        &day_utc_str, &week_utc_str, &active_str,
+                        &day_s_label, &week_s_label, &month_s_label, &year_s_label, &now_local,
+                        day_lo, week_lo, month_lo, year_lo, hi,
+                        &day_utc_str, &week_utc_str, &month_utc_str, &year_utc_str, &active_str,
                         day_start_hour,
                     );
                     if let Ok(mut locked) = stats.write() {
@@ -290,26 +314,38 @@ fn build_all_stats(
     store: &UsageStore,
     day_s_label: &DateTime<Tz>,
     week_s_label: &DateTime<Tz>,
+    month_s_label: &DateTime<Tz>,
+    year_s_label: &DateTime<Tz>,
     now_label: &DateTime<Tz>,
     day_lo: f64,
     week_lo: f64,
+    month_lo: f64,
+    year_lo: f64,
     hi: f64,
     day_utc_str: &str,
     week_utc_str: &str,
+    month_utc_str: &str,
+    year_utc_str: &str,
     active_str: &str,
     day_start_hour: u32,
 ) -> AllStats {
     // Time labels — use timezone-aware boundaries (frontend only)
     let time_labels_week = compute_time_labels(week_s_label, now_label, "week", day_start_hour);
     let time_labels_day = compute_time_labels(day_s_label, now_label, "day", day_start_hour);
+    let time_labels_month = compute_time_labels(month_s_label, now_label, "month", day_start_hour);
+    let time_labels_year = compute_time_labels(year_s_label, now_label, "year", day_start_hour);
 
     // LOC buckets from commit_stats (SQL-backed, no Rust loop)
     let git_buckets_week = store.query_commit_buckets(week_lo, hi);
     let git_buckets_day = store.query_commit_buckets(day_lo, hi);
+    let git_buckets_month = store.query_commit_buckets(month_lo, hi);
+    let git_buckets_year = store.query_commit_buckets(year_lo, hi);
 
     // LOC totals from commit_stats
     let day_loc = store.query_commit_totals(day_utc_str);
     let week_loc = store.query_commit_totals(week_utc_str);
+    let month_loc = store.query_commit_totals(month_utc_str);
+    let year_loc = store.query_commit_totals(year_utc_str);
 
     // Day stats
     let (day_cost_total, day_cost_breakdown, day_tokens, _day_sessions) = store.query_aggregates(day_utc_str);
@@ -324,6 +360,20 @@ fn build_all_stats(
     let (week_sess_total, week_sess_active) = store.count_sessions(week_utc_str, active_str);
     let week_cost_buckets = store.query_cost_buckets(week_lo, hi);
     let week_token_buckets = store.query_token_buckets(week_lo, hi);
+
+    // Month stats
+    let (month_cost_total, month_cost_breakdown, month_tokens, _month_sessions) = store.query_aggregates(month_utc_str);
+    let month_source_breakdown = store.query_aggregate_source_breakdown(month_utc_str);
+    let (month_sess_total, month_sess_active) = store.count_sessions(month_utc_str, active_str);
+    let month_cost_buckets = store.query_cost_buckets(month_lo, hi);
+    let month_token_buckets = store.query_token_buckets(month_lo, hi);
+
+    // Year stats
+    let (year_cost_total, year_cost_breakdown, year_tokens, _year_sessions) = store.query_aggregates(year_utc_str);
+    let year_source_breakdown = store.query_aggregate_source_breakdown(year_utc_str);
+    let (year_sess_total, year_sess_active) = store.count_sessions(year_utc_str, active_str);
+    let year_cost_buckets = store.query_cost_buckets(year_lo, hi);
+    let year_token_buckets = store.query_token_buckets(year_lo, hi);
 
     AllStats {
         ready: true,
@@ -343,14 +393,32 @@ fn build_all_stats(
             sessions_total: week_sess_total, sessions_active: week_sess_active,
             source_breakdown: week_source_breakdown,
         },
-        // month/year left as Default (frontend renders 0s)
-        git_buckets_day, git_buckets_week,
+        month: RangeStats {
+            loc_added: month_loc.0, loc_deleted: month_loc.1,
+            cost_total: month_cost_total,
+            cost_breakdown: month_cost_breakdown,
+            tokens: month_tokens,
+            sessions_total: month_sess_total, sessions_active: month_sess_active,
+            source_breakdown: month_source_breakdown,
+        },
+        year: RangeStats {
+            loc_added: year_loc.0, loc_deleted: year_loc.1,
+            cost_total: year_cost_total,
+            cost_breakdown: year_cost_breakdown,
+            tokens: year_tokens,
+            sessions_total: year_sess_total, sessions_active: year_sess_active,
+            source_breakdown: year_source_breakdown,
+        },
+        git_buckets_day, git_buckets_week, git_buckets_month, git_buckets_year,
         cost_buckets_day: day_cost_buckets,
         cost_buckets_week: week_cost_buckets,
+        cost_buckets_month: month_cost_buckets,
+        cost_buckets_year: year_cost_buckets,
         token_buckets_day: day_token_buckets,
         token_buckets_week: week_token_buckets,
-        time_labels_day, time_labels_week,
-        ..Default::default()
+        token_buckets_month: month_token_buckets,
+        token_buckets_year: year_token_buckets,
+        time_labels_day, time_labels_week, time_labels_month, time_labels_year,
     }
 }
 

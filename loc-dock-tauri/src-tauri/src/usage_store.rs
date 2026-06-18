@@ -8,7 +8,7 @@ use log::{info, warn};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-const RETENTION_DAYS: f64 = 7.0;
+const RETENTION_DAYS: f64 = 400.0;
 const DAY_SECS: f64 = 86400.0;
 /// Timeline resolution — must match `data.rs::N_BUCKETS` (frontend expects this many).
 const N_BUCKETS: usize = 48;

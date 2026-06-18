@@ -844,31 +844,6 @@ impl UsageStore {
         }
     }
 
-    /// Per-repo: (repo_name, latest_sha) for summary change detection.
-    /// Only returns repos that have at least one commit in the table.
-    pub fn repo_latest_shas(&self) -> Vec<(String, String)> {
-        match self.con.prepare(
-            "SELECT repo, sha FROM (
-                 SELECT repo, sha, ROW_NUMBER() OVER (PARTITION BY repo ORDER BY ts DESC) AS rn
-                 FROM commit_stats
-             ) sq WHERE rn = 1"
-        ) {
-            Ok(mut stmt) => match stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            }) {
-                Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
-                Err(e) => {
-                    warn!("Repo SHAs: {}", e);
-                    Vec::new()
-                }
-            },
-            Err(e) => {
-                warn!("Repo SHAs prepare: {}", e);
-                Vec::new()
-            }
-        }
-    }
-
     pub fn count_sessions(&self, since_str: &str, active_str: &str) -> (i64, i64) {
         if !self.initialized { return (0, 0); }
         match self.con.prepare(

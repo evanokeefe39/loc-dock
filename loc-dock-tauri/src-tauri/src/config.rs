@@ -1,4 +1,5 @@
 use crate::pricing::Pricing;
+use crate::source_adapter::DataSourceConfig;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -44,13 +45,18 @@ pub struct Settings {
     pub log_dir: PathBuf,
     #[serde(default = "default_usage_cache_dir")]
     pub usage_cache_dir: PathBuf,
+    /// User-configured data sources (replaces single claude_dir/pi_dir).
+    #[serde(default)]
+    pub data_sources: Vec<DataSourceConfig>,
+    /// Optional path to a user-edited LiteLLM pricing JSON override.
+    #[serde(default)]
+    pub model_pricing_path: Option<PathBuf>,
 }
 
 pub struct Config {
     pub settings: Settings,
     pub config_dir: PathBuf,
-    pub projects_dir: PathBuf,
-    pub pi_sessions_dir: PathBuf,
+    pub repos_dir: PathBuf,
     pub pricing: Pricing,
 }
 
@@ -58,10 +64,9 @@ impl Config {
     pub fn load() -> Self {
         let config_dir = Self::config_dir();
         let settings = Settings::load(&config_dir);
-        let projects_dir = settings.claude_dir.join("projects");
-        let pi_sessions_dir = settings.pi_dir.join("agent").join("sessions");
+        let repos_dir = settings.repos_dir.clone();
         let pricing = Pricing::load(&config_dir);
-        Config { settings, config_dir, projects_dir, pi_sessions_dir, pricing }
+        Config { settings, config_dir, repos_dir, pricing }
     }
 
     pub fn config_dir() -> PathBuf {
@@ -69,46 +74,133 @@ impl Config {
             .unwrap_or_else(|| PathBuf::from("."))
             .join("loc-dock")
     }
+
+    /// Only enabled data sources.
+    pub fn active_data_sources(&self) -> Vec<&DataSourceConfig> {
+        self.settings.data_sources.iter().filter(|s| s.enabled).collect()
+    }
+
+    /// Resolve the model pricing file path: user override → bundled resource.
+    pub fn resolve_pricing_path(&self) -> Option<PathBuf> {
+        self.settings.model_pricing_path.clone()
+    }
 }
 
 impl Settings {
     pub fn load(config_dir: &PathBuf) -> Self {
         let path = config_dir.join("settings.json");
-        if path.exists() {
+        let mut migrated = false;
+        let settings: Self = if path.exists() {
             match std::fs::read_to_string(&path) {
-                Ok(content) => match serde_json::from_str(&content) {
-                    Ok(settings) => return settings,
-                    Err(e) => log::error!("Failed to parse settings.json: {}", e),
-                },
-                Err(e) => log::error!("Failed to read settings.json: {}", e),
+                Ok(content) => {
+                    // v5→v6 migration: if claude_dir/pi_dir exist but data_sources is empty,
+                    // create DataSourceConfig entries from the old fields.
+                    #[derive(Deserialize)]
+                    struct OldSettings {
+                        claude_dir: Option<PathBuf>,
+                        pi_dir: Option<PathBuf>,
+                        #[serde(default)]
+                        data_sources: Vec<DataSourceConfig>,
+                    }
+                    match serde_json::from_str::<OldSettings>(&content) {
+                        Ok(old) if old.data_sources.is_empty() => {
+                            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+                            let cd = old.claude_dir.unwrap_or_else(|| home.join(".claude"));
+                            let pd = old.pi_dir.unwrap_or_else(|| home.join(".pi"));
+                            let mut s: Self = serde_json::from_str(&content)
+                                .unwrap_or_else(|_| Self::default());
+                            s.data_sources = vec![
+                                DataSourceConfig {
+                                    id: "claude-main".to_string(),
+                                    adapter: "claude".to_string(),
+                                    display_name: "Claude Code".to_string(),
+                                    path: cd.join("projects"),
+                                    enabled: true,
+                                },
+                                DataSourceConfig {
+                                    id: "pi-main".to_string(),
+                                    adapter: "pi".to_string(),
+                                    display_name: "Pi".to_string(),
+                                    path: pd.join("agent").join("sessions"),
+                                    enabled: true,
+                                },
+                            ];
+                            migrated = true;
+                            s
+                        }
+                        Ok(_) => {
+                            // Has data_sources already — deserialize normally
+                            serde_json::from_str(&content).unwrap_or_else(|_| Self::default())
+                        }
+                        Err(_) => {
+                            // Not v5 format either — try as current
+                            match serde_json::from_str::<Self>(&content) {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    log::error!("Failed to parse settings.json: {}", e);
+                                    Self::default()
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::error!("Failed to read settings.json: {}", e);
+                    Self::default()
+                }
             }
-        }
-        // Migrate from .env if it exists
-        let env_path = config_dir.join(".env");
-        if env_path.exists() {
-            let _ = dotenvy::from_path(&env_path);
-            let settings = Self::from_env();
+        } else {
+            // Migrate from .env if it exists
+            let env_path = config_dir.join(".env");
+            if env_path.exists() {
+                let _ = dotenvy::from_path(&env_path);
+                let s = Self::from_env();
+                s
+            } else {
+                Self::default()
+            }
+        };
+
+        if migrated {
             if let Err(e) = settings.save(config_dir) {
-                log::error!("Failed to migrate .env to settings.json: {}", e);
+                log::error!("Failed to save migrated settings.json: {}", e);
             }
-            log::info!("Migrated settings from .env to settings.json");
-            return settings;
+            log::info!("Migrated settings: claude_dir/pi_dir → data_sources");
         }
-        Self::default()
+
+        settings
     }
 
     fn from_env() -> Self {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let cd: PathBuf = std::env::var("LOCDOCK_CLAUDE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| home.join(".claude"));
+        let pd: PathBuf = std::env::var("LOCDOCK_PI_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| home.join(".pi"));
         Settings {
             repos_dir: std::env::var("LOCDOCK_REPOS_DIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| home.join("repos")),
-            claude_dir: std::env::var("LOCDOCK_CLAUDE_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| home.join(".claude")),
-            pi_dir: std::env::var("LOCDOCK_PI_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| home.join(".pi")),
+            claude_dir: cd.clone(),
+            pi_dir: pd.clone(),
+            data_sources: vec![
+                DataSourceConfig {
+                    id: "claude-main".to_string(),
+                    adapter: "claude".to_string(),
+                    display_name: "Claude Code".to_string(),
+                    path: cd.join("projects"),
+                    enabled: true,
+                },
+                DataSourceConfig {
+                    id: "pi-main".to_string(),
+                    adapter: "pi".to_string(),
+                    display_name: "Pi".to_string(),
+                    path: pd.join("agent").join("sessions"),
+                    enabled: true,
+                },
+            ],
             timezone: std::env::var("LOCDOCK_TIMEZONE")
                 .unwrap_or_else(|_| default_timezone()),
             day_start_hour: std::env::var("LOCDOCK_DAY_START_HOUR")
@@ -149,6 +241,7 @@ impl Settings {
             hide_repos_without_prs: false,
             log_dir: default_log_dir(),
             usage_cache_dir: default_usage_cache_dir(),
+            model_pricing_path: None,
         }
     }
 
@@ -163,10 +256,28 @@ impl Settings {
 impl Default for Settings {
     fn default() -> Self {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let cd = home.join(".claude");
+        let pd = home.join(".pi");
         Settings {
             repos_dir: home.join("repos"),
-            claude_dir: home.join(".claude"),
-            pi_dir: home.join(".pi"),
+            claude_dir: cd.clone(),
+            pi_dir: pd.clone(),
+            data_sources: vec![
+                DataSourceConfig {
+                    id: "claude-main".to_string(),
+                    adapter: "claude".to_string(),
+                    display_name: "Claude Code".to_string(),
+                    path: cd.join("projects"),
+                    enabled: true,
+                },
+                DataSourceConfig {
+                    id: "pi-main".to_string(),
+                    adapter: "pi".to_string(),
+                    display_name: "Pi".to_string(),
+                    path: pd.join("agent").join("sessions"),
+                    enabled: true,
+                },
+            ],
             timezone: default_timezone(),
             day_start_hour: 7,
             week_start_day: 0,
@@ -184,6 +295,7 @@ impl Default for Settings {
             hide_repos_without_prs: false,
             log_dir: default_log_dir(),
             usage_cache_dir: default_usage_cache_dir(),
+            model_pricing_path: None,
         }
     }
 }

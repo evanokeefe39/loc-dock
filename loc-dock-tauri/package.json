@@ -11,6 +11,8 @@
   },
   "type": "module",
   "scripts": {
+    "prebuild": "node scripts/download-litellm-pricing.mjs",
+    "pretauri": "node scripts/download-litellm-pricing.mjs",
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",

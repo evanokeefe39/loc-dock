@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime};
 const RETENTION_DAYS: f64 = 400.0;
 const DAY_SECS: f64 = 86400.0;
 const MARKER: &str = "usage_cache.db.reset";
-const SCHEMA_VERSION: &str = "9";  // v9: clean bad timezone-shifted commit_stats timestamps
+const SCHEMA_VERSION: &str = "10";  // v10: add cost_type + data_sources
 
 /// Files ingested per silver INSERT. Caps transient JSON-parse memory on cold
 /// rebuilds; smaller batches + bounded threads keep the non-spillable parse peak
@@ -28,16 +28,19 @@ const MAX_OBJECT_SIZE: u64 = 64 * 1024 * 1024;  // 64 MB; default 16 MB too smal
 struct SqlTemplates {
     claude_silver: String,
     pi_silver: String,
+    codex_silver: String,
 }
 
 impl SqlTemplates {
     fn load(config_dir: &Path) -> Self {
         let bundled_claude = include_str!("../sql/claude-silver.sql");
         let bundled_pi = include_str!("../sql/pi-silver.sql");
+        let bundled_codex = include_str!("../sql/codex-silver.sql");
         let sql_dir = config_dir.join("sql");
         SqlTemplates {
             claude_silver: load_or_fallback(&sql_dir.join("claude-silver.sql"), bundled_claude),
             pi_silver: load_or_fallback(&sql_dir.join("pi-silver.sql"), bundled_pi),
+            codex_silver: load_or_fallback(&sql_dir.join("codex-silver.sql"), bundled_codex),
         }
     }
 
@@ -171,6 +174,7 @@ impl UsageStore {
                  cache_write_cost  DOUBLE NOT NULL DEFAULT 0.0,
                  cache_read_cost   DOUBLE NOT NULL DEFAULT 0.0,
                  total_cost        DOUBLE NOT NULL DEFAULT 0.0,
+                 cost_type          TEXT NOT NULL DEFAULT 'estimated',
                  file_path         TEXT NOT NULL,
                  UNIQUE(source, session_id, ts, file_path)
              );
@@ -231,6 +235,18 @@ impl UsageStore {
 "
         );
 
+        // v10: data_sources — mirrors enabled sources from settings for query convenience.
+        let _ = con.execute_batch(
+            "CREATE TABLE IF NOT EXISTS data_sources (
+                 id           TEXT PRIMARY KEY,
+                 adapter      TEXT NOT NULL,
+                 display_name TEXT NOT NULL,
+                 path         TEXT NOT NULL,
+                 enabled      BOOLEAN NOT NULL DEFAULT true,
+                 created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+             );"
+        );
+
         // v6: ingested_files — stat registry for incremental ingest (Spike 4).
         // A file is re-ingested only when its (mtime, size) changes; changed files
         // are re-read whole (no byte seek), with INSERT OR IGNORE deduping prior rows.
@@ -242,6 +258,7 @@ impl UsageStore {
              );
 "
         );
+
 
         let row_count: i64 = con
             .prepare("SELECT COUNT(*) FROM entries")
@@ -396,6 +413,7 @@ fn process_source(
     let batch_files = match kind {
         SourceKind::Claude => INGEST_BATCH_FILES,
         SourceKind::Pi => 1,
+        SourceKind::Codex => INGEST_BATCH_FILES,
     };
 
     let mut total = 0usize;
@@ -452,6 +470,7 @@ fn ingest_files(con: &Connection, kind: SourceKind, paths: &[PathBuf], pricing: 
     let sql = match kind {
         SourceKind::Claude => templates.format_sql(&templates.claude_silver, &paths_array, pricing),
         SourceKind::Pi => templates.format_sql(&templates.pi_silver, &paths_array, pricing),
+        SourceKind::Codex => templates.format_sql(&templates.codex_silver, &paths_array, pricing),
     };
 
     if kind == SourceKind::Pi {
@@ -952,6 +971,8 @@ mod tests {
         msg TEXT, added BIGINT NOT NULL, deleted BIGINT NOT NULL,
         file_ct INT NOT NULL DEFAULT 1, UNIQUE(repo, sha)
     );";
+
+    const N_BUCKETS: usize = 48;
 
     fn test_con() -> Connection {
         let con = Connection::open_in_memory().unwrap();

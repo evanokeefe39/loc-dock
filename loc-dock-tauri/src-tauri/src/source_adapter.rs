@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -8,6 +9,7 @@ use std::time::SystemTime;
 pub enum SourceKind {
     Claude,
     Pi,
+    Codex,
 }
 
 impl SourceKind {
@@ -15,8 +17,45 @@ impl SourceKind {
         match self {
             SourceKind::Claude => "claude",
             SourceKind::Pi => "pi",
+            SourceKind::Codex => "codex",
         }
     }
+
+    /// Parse a kind from its adapter name string.
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "claude" => Some(SourceKind::Claude),
+            "pi" => Some(SourceKind::Pi),
+            "codex" => Some(SourceKind::Codex),
+            _ => None,
+        }
+    }
+
+    /// Subdirectory path components to skip when discovering session files.
+    pub fn skip_subdirs(self) -> Vec<String> {
+        match self {
+            SourceKind::Claude => vec!["subagents".to_string()],
+            SourceKind::Pi => vec![],
+            SourceKind::Codex => vec![],
+        }
+    }
+}
+
+// ── Config-driven data source ─────────────────────────────────────────────
+
+/// A user-configured data source, stored in settings.json.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataSourceConfig {
+    pub id: String,
+    pub adapter: String, // "pi", "claude", "codex"
+    pub display_name: String,
+    pub path: PathBuf,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+fn default_enabled() -> bool {
+    true
 }
 
 // ── Glob-based file discoverer ────────────────────────────────────────────

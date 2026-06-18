@@ -69,6 +69,10 @@ pub fn run() {
             commands::reset_summary_cache,
             commands::get_job_logs,
             commands::clear_job_logs,
+            commands::list_sources,
+            commands::add_source,
+            commands::remove_source,
+            commands::toggle_source,
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {

@@ -3,9 +3,18 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Save } from "lucide-react";
 
+interface DataSourceConfig {
+  id: string;
+  adapter: string;
+  display_name: string;
+  path: string;
+  enabled: boolean;
+}
+
 interface Settings {
   repos_dir: string;
-  claude_dir: string;
+  data_sources: DataSourceConfig[];
+  model_pricing_path: string | null;
   timezone: string;
   day_start_hour: number;
   week_start_day: number;
@@ -79,6 +88,15 @@ export function SettingsPanel({ visible, onClose }: Props) {
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [confirmReset, setConfirmReset] = useState<string | null>(null);
+  const [showAddSource, setShowAddSource] = useState(false);
+  const [addingSource, setAddingSource] = useState(false);
+  const [newSource, setNewSource] = useState<DataSourceConfig>({
+    id: '',
+    adapter: 'pi',
+    display_name: '',
+    path: '',
+    enabled: true,
+  });
   const original = useRef<string>("");
 
   useEffect(() => {
@@ -127,6 +145,49 @@ export function SettingsPanel({ visible, onClose }: Props) {
 
   const activeRow = confirmReset ? DATA_ROWS.find(r => r.cmd === confirmReset) : null;
 
+  const handleAddSource = async () => {
+    setAddingSource(true);
+    try {
+      const id = newSource.adapter + '-' + Date.now().toString(36);
+      await invoke('add_source', { source: { ...newSource, id } });
+      const s = await invoke<Settings>('get_settings');
+      setSettings(s);
+      original.current = JSON.stringify(s);
+      setDirty(false);
+      setShowAddSource(false);
+      setNewSource({ id: '', adapter: 'pi', display_name: '', path: '', enabled: true });
+    } catch (e) {
+      console.error('Failed to add source:', e);
+      alert('Failed to add source: ' + e);
+    }
+    setAddingSource(false);
+  };
+
+  const handleRemoveSource = async (id: string) => {
+    if (!confirm('Remove this data source? Entries already imported will be kept.')) return;
+    try {
+      await invoke('remove_source', { id });
+      const s = await invoke<Settings>('get_settings');
+      setSettings(s);
+      original.current = JSON.stringify(s);
+      setDirty(false);
+    } catch (e) {
+      console.error('Failed to remove source:', e);
+    }
+  };
+
+  const handleToggleSource = async (id: string) => {
+    try {
+      await invoke('toggle_source', { id });
+      const s = await invoke<Settings>('get_settings');
+      setSettings(s);
+      original.current = JSON.stringify(s);
+      setDirty(false);
+    } catch (e) {
+      console.error('Failed to toggle source:', e);
+    }
+  };
+
   return (
     <div className="settings-overlay">
       <div className="settings-header">
@@ -154,10 +215,86 @@ export function SettingsPanel({ visible, onClose }: Props) {
           <input value={settings.repos_dir} onChange={e => update("repos_dir", e.target.value)} />
         </label>
 
-        <label>
-          <span>Claude directory</span>
-          <input value={settings.claude_dir} onChange={e => update("claude_dir", e.target.value)} />
-        </label>
+        {/* ── Data Sources ── */}
+        <div className="settings-section-heading">
+          <span>Data Sources</span>
+          <button
+            className="settings-add-source-btn"
+            onClick={() => setShowAddSource(true)}
+            disabled={showAddSource}
+            title="Add a session source"
+          >
+            + Add Source
+          </button>
+        </div>
+
+        {showAddSource && (
+          <div className="settings-add-source-form">
+            <label>
+              <span>Type</span>
+              <select value={newSource.adapter} onChange={e => setNewSource({...newSource, adapter: e.target.value})}>
+                <option value="pi">Pi</option>
+                <option value="claude">Claude Code</option>
+                <option value="codex">Codex CLI</option>
+              </select>
+            </label>
+            <label>
+              <span>Display name</span>
+              <input
+                value={newSource.display_name}
+                onChange={e => setNewSource({...newSource, display_name: e.target.value})}
+                placeholder="My Pi sessions"
+              />
+            </label>
+            <label>
+              <span>Session directory</span>
+              <input
+                value={newSource.path}
+                onChange={e => setNewSource({...newSource, path: e.target.value})}
+                placeholder="~/.pi/agent/sessions"
+              />
+            </label>
+            <div className="settings-add-source-actions">
+              <button
+                className="settings-action-btn settings-action-primary"
+                onClick={handleAddSource}
+                disabled={addingSource}
+              >
+                {addingSource ? 'Adding...' : 'Add'}
+              </button>
+              <button className="settings-action-btn" onClick={() => setShowAddSource(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        {settings.data_sources && settings.data_sources.map(source => (
+          <div key={source.id} className="settings-source-row">
+            <div className="settings-source-info">
+              <span className="settings-source-adapter">{source.adapter}</span>
+              <span className="settings-source-name">{source.display_name}</span>
+              <span className="settings-source-path">{source.path}</span>
+            </div>
+            <div className="settings-source-actions">
+              <label className="settings-toggle">
+                <input
+                  type="checkbox"
+                  checked={source.enabled}
+                  onChange={() => handleToggleSource(source.id)}
+                />
+                Enabled
+              </label>
+              <button
+                className="settings-delete-source-btn"
+                onClick={() => handleRemoveSource(source.id)}
+                title="Remove this source"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        ))}
 
         <label>
           <span>Theme file</span>
@@ -271,6 +408,18 @@ export function SettingsPanel({ visible, onClose }: Props) {
             </div>
           </div>
         )}
+
+        {/* ── Model Pricing ── */}
+        <div className="settings-section-heading">Model Pricing</div>
+
+        <label title="Path to a LiteLLM-format pricing JSON to override bundled prices. Leave empty for bundled defaults.">
+          <span>Pricing override (optional)</span>
+          <input
+            value={settings.model_pricing_path ?? ''}
+            onChange={e => update('model_pricing_path', e.target.value || null)}
+            placeholder="~/.config/loc-dock/litellm.json"
+          />
+        </label>
 
         {/* ── AI Summaries ── */}
         <div className="settings-section-heading">AI Summaries</div>

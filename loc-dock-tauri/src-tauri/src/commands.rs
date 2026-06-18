@@ -1,6 +1,7 @@
 use crate::config::{Config, Settings};
 use crate::data::SharedStats;
 use crate::job_log::{self, LogEntry};
+use crate::source_adapter::DataSourceConfig;
 use crate::summary::{self, SummaryData};
 use crate::task_queue::{ActiveTask, TaskQueue};
 use crate::theme::Theme;
@@ -130,3 +131,49 @@ pub async fn snap_to_corner(window: Window, corner: String) -> Result<(), String
     }
     Ok(())
 }
+
+// ── Data source management ──────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn list_sources(app: AppHandle) -> Vec<DataSourceConfig> {
+    let state = app.state::<Arc<RwLock<Config>>>();
+    let cfg = state.read().unwrap();
+    cfg.settings.data_sources.clone()
+}
+
+#[tauri::command]
+pub async fn add_source(app: AppHandle, source: DataSourceConfig) -> Result<(), String> {
+    let state = app.state::<Arc<RwLock<Config>>>();
+    let mut cfg = state.write().unwrap();
+    if cfg.settings.data_sources.iter().any(|s| s.id == source.id) {
+        return Err(format!("Source '{}' already exists", source.id));
+    }
+    if !source.path.exists() {
+        return Err(format!("Path '{}' does not exist", source.path.display()));
+    }
+    cfg.settings.data_sources.push(source);
+    cfg.settings.save(&cfg.config_dir)
+}
+
+#[tauri::command]
+pub async fn remove_source(app: AppHandle, id: String) -> Result<(), String> {
+    let state = app.state::<Arc<RwLock<Config>>>();
+    let mut cfg = state.write().unwrap();
+    let len_before = cfg.settings.data_sources.len();
+    cfg.settings.data_sources.retain(|s| s.id != id);
+    if cfg.settings.data_sources.len() == len_before {
+        return Err(format!("Source '{}' not found", id));
+    }
+    cfg.settings.save(&cfg.config_dir)
+}
+
+#[tauri::command]
+pub async fn toggle_source(app: AppHandle, id: String) -> Result<(), String> {
+    let state = app.state::<Arc<RwLock<Config>>>();
+    let mut cfg = state.write().unwrap();
+    let src = cfg.settings.data_sources.iter_mut().find(|s| s.id == id)
+        .ok_or_else(|| format!("Source '{}' not found", id))?;
+    src.enabled = !src.enabled;
+    cfg.settings.save(&cfg.config_dir)
+}
+

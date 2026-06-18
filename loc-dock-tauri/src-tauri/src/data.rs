@@ -48,13 +48,11 @@ pub type SharedStats = Arc<RwLock<AllStats>>;
 pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: SharedStats, summary_state: SharedSummary, con: Connection) {
     std::thread::spawn(move || {
         // Read config once — clones are cheap, avoids holding the lock.
-        let (projects_dir, pi_sessions_dir, usage_cache_dir, pricing, config_dir,
+        let (usage_cache_dir, pricing, config_dir,
              tz, day_start_hour, week_start_day, repos_dir,
              session_idle_timeout, refresh_interval, git_history_days) = {
             let cfg = config.read().unwrap();
             (
-                cfg.projects_dir.clone(),
-                cfg.pi_sessions_dir.clone(),
                 cfg.settings.usage_cache_dir.clone(),
                 cfg.pricing.clone(),
                 cfg.config_dir.clone(),
@@ -68,18 +66,17 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
             )
         };
 
-        let claude_discoverer = GlobFileDiscoverer::new(
-            projects_dir,
-            vec!["subagents".to_string()],
-        );
-        let pi_discoverer = GlobFileDiscoverer::new(
-            pi_sessions_dir,
-            vec![],
-        );
-        let source_manager = SourceManager::with_discoverers(vec![
-            (claude_discoverer, SourceKind::Claude),
-            (pi_discoverer, SourceKind::Pi),
-        ]);
+        // Build discoverers from data sources config — no hardcoded paths.
+        let source_pairs: Vec<_> = config.read().unwrap()
+            .settings.data_sources.iter()
+            .filter(|s| s.enabled)
+            .filter_map(|s| {
+                let kind = SourceKind::from_str(&s.adapter)?;
+                let discoverer = GlobFileDiscoverer::new(s.path.clone(), kind.skip_subdirs());
+                Some((discoverer, kind))
+            })
+            .collect();
+        let source_manager = SourceManager::with_discoverers(source_pairs);
         let mut store = UsageStore::new(source_manager, &usage_cache_dir, pricing, &config_dir, con);
         let queue = app.state::<TaskQueue>();
 

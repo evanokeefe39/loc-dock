@@ -215,14 +215,83 @@ export function SettingsPanel({ visible, onClose }: Props) {
           <input value={settings.repos_dir} onChange={e => update("repos_dir", e.target.value)} />
         </label>
 
-        {/* ── Data Sources ── */}
-        <div className="settings-section-heading">
-          <span>Data Sources</span>
+
+
+        <label>
+          <span>Theme file</span>
+          <input value={settings.theme_path} onChange={e => update("theme_path", e.target.value)} />
+        </label>
+
+        <label>
+          <span>Timezone</span>
+          <select value={settings.timezone} onChange={e => update("timezone", e.target.value)}>
+            {!TIMEZONES.some(([val]) => val === settings.timezone) && (
+              <option value={settings.timezone}>{settings.timezone}</option>
+            )}
+            {TIMEZONES.map(([val, label]) => (
+              <option key={val} value={val}>{label}</option>
+            ))}
+          </select>
+        </label>
+
+        <label>
+          <span>Day starts at</span>
+          <select value={settings.day_start_hour} onChange={e => update("day_start_hour", parseInt(e.target.value))}>
+            {Array.from({ length: 24 }, (_, i) => (
+              <option key={i} value={i}>{i.toString().padStart(2, "0")}:00</option>
+            ))}
+          </select>
+        </label>
+
+        <label>
+          <span>Week starts on</span>
+          <select value={settings.week_start_day} onChange={e => update("week_start_day", parseInt(e.target.value))}>
+            {DAYS.map((d, i) => (
+              <option key={i} value={i}>{d}</option>
+            ))}
+          </select>
+        </label>
+
+        <label>
+          <span>Refresh interval (seconds)</span>
+          <input
+            type="number"
+            min={10}
+            max={600}
+            value={settings.refresh_interval}
+            onChange={e => update("refresh_interval", parseInt(e.target.value) || 0)}
+          />
+        </label>
+
+        <label title="Sessions with no activity within this period are considered inactive">
+          <span>Session idle timeout (seconds)</span>
+          <input
+            type="number"
+            min={30}
+            max={3600}
+            value={settings.session_idle_timeout}
+            onChange={e => update("session_idle_timeout", parseInt(e.target.value) || 0)}
+          />
+        </label>
+
+        <label className="settings-checkbox">
+          <input
+            type="checkbox"
+            checked={settings.autostart}
+            onChange={e => update("autostart", e.target.checked)}
+          />
+          <span>Start on login</span>
+        </label>
+
+        {/* ── Data ── */}
+        <div className="settings-section-heading">Data</div>
+
+        <div className="settings-data-section-note">
+          <span className="settings-data-section-label">Session Sources</span>
           <button
             className="settings-add-source-btn"
             onClick={() => setShowAddSource(true)}
             disabled={showAddSource}
-            title="Add a session source"
           >
             + Add Source
           </button>
@@ -296,75 +365,6 @@ export function SettingsPanel({ visible, onClose }: Props) {
           </div>
         ))}
 
-        <label>
-          <span>Theme file</span>
-          <input value={settings.theme_path} onChange={e => update("theme_path", e.target.value)} />
-        </label>
-
-        <label>
-          <span>Timezone</span>
-          <select value={settings.timezone} onChange={e => update("timezone", e.target.value)}>
-            {!TIMEZONES.some(([val]) => val === settings.timezone) && (
-              <option value={settings.timezone}>{settings.timezone}</option>
-            )}
-            {TIMEZONES.map(([val, label]) => (
-              <option key={val} value={val}>{label}</option>
-            ))}
-          </select>
-        </label>
-
-        <label>
-          <span>Day starts at</span>
-          <select value={settings.day_start_hour} onChange={e => update("day_start_hour", parseInt(e.target.value))}>
-            {Array.from({ length: 24 }, (_, i) => (
-              <option key={i} value={i}>{i.toString().padStart(2, "0")}:00</option>
-            ))}
-          </select>
-        </label>
-
-        <label>
-          <span>Week starts on</span>
-          <select value={settings.week_start_day} onChange={e => update("week_start_day", parseInt(e.target.value))}>
-            {DAYS.map((d, i) => (
-              <option key={i} value={i}>{d}</option>
-            ))}
-          </select>
-        </label>
-
-        <label>
-          <span>Refresh interval (seconds)</span>
-          <input
-            type="number"
-            min={10}
-            max={600}
-            value={settings.refresh_interval}
-            onChange={e => update("refresh_interval", parseInt(e.target.value) || 0)}
-          />
-        </label>
-
-        <label title="Sessions with no activity within this period are considered inactive">
-          <span>Session idle timeout (seconds)</span>
-          <input
-            type="number"
-            min={30}
-            max={3600}
-            value={settings.session_idle_timeout}
-            onChange={e => update("session_idle_timeout", parseInt(e.target.value) || 0)}
-          />
-        </label>
-
-        <label className="settings-checkbox">
-          <input
-            type="checkbox"
-            checked={settings.autostart}
-            onChange={e => update("autostart", e.target.checked)}
-          />
-          <span>Start on login</span>
-        </label>
-
-        {/* ── Data ── */}
-        <div className="settings-section-heading">Data</div>
-
         {DATA_ROWS.map(row => (
           <div key={row.key} className="settings-data-row">
             <label>
@@ -409,8 +409,7 @@ export function SettingsPanel({ visible, onClose }: Props) {
           </div>
         )}
 
-        {/* ── Model Pricing ── */}
-        <div className="settings-section-heading">Model Pricing</div>
+        <hr className="settings-data-divider" />
 
         <label title="Path to a LiteLLM-format pricing JSON to override bundled prices. Leave empty for bundled defaults.">
           <span>Pricing override (optional)</span>

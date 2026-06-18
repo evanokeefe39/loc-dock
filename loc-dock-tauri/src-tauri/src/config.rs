@@ -36,6 +36,8 @@ pub struct Settings {
     pub summary_debounce_secs: u64,
     #[serde(default = "default_summary_exclude_pattern")]
     pub summary_exclude_pattern: String,
+    #[serde(default = "default_git_history_days")]
+    pub git_history_days: u64,
     #[serde(default)]
     pub hide_repos_without_prs: bool,
     #[serde(default = "default_log_dir")]
@@ -127,6 +129,11 @@ impl Settings {
                 .unwrap_or(false),
             refresh_interval: 60,
             session_idle_timeout: 300,
+            git_history_days: std::env::var("LOCDOCK_GIT_HISTORY_DAYS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(200)
+                .min(3650),
             summary_enabled: std::env::var("LOCDOCK_SUMMARY_ENABLED")
                 .map(|s| s != "false" && s != "0")
                 .unwrap_or(true),
@@ -167,6 +174,7 @@ impl Default for Settings {
             autostart: false,
             refresh_interval: 60,
             session_idle_timeout: 300,
+            git_history_days: 200,
             summary_enabled: true,
             llm_api_key: None,
             llm_api_endpoint: "https://api.deepseek.com/v1".to_string(),
@@ -211,6 +219,8 @@ fn default_refresh_interval() -> u64 {
 fn default_session_idle_timeout() -> u64 {
     300
 }
+
+fn default_git_history_days() -> u64 { 200 }
 
 fn default_summary_enabled() -> bool {
     true

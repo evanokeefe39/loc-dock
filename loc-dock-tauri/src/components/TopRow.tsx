@@ -4,6 +4,7 @@ import { fmtCost, fmtLoc } from "../lib/format";
 
 interface Props {
   stats: RangeStats | null;
+  ready: boolean;
   range: TimeRange;
   mode: ChartMode;
   onToggleRange: () => void;
@@ -15,8 +16,8 @@ interface Props {
   summaryVisible: boolean;
 }
 
-export function TopRow({ stats, range, mode, onToggleRange, onToggleMode, onSettings, onClose, onShowTooltip, onToggleSummary, summaryVisible }: Props) {
-  const s = stats;
+export function TopRow({ stats, ready, range, mode, onToggleRange, onToggleMode, onSettings, onClose, onShowTooltip, onToggleSummary, summaryVisible }: Props) {
+  const s = ready ? stats : null;
 
   return (
     <div className="top-row">
@@ -25,10 +26,10 @@ export function TopRow({ stats, range, mode, onToggleRange, onToggleMode, onSett
           <ScrollText size={14} />
         </button>
         <span className="sep" />
-        <span className="loc-add">+{s ? fmtLoc(s.loc_added) : "0"}</span>
-        <span className="loc-del">-{s ? fmtLoc(s.loc_deleted) : "0"}</span>
+        <span className="loc-add">+{s ? fmtLoc(s.loc_added) : "--"}</span>
+        <span className="loc-del">-{s ? fmtLoc(s.loc_deleted) : "--"}</span>
         <span className="sep" />
-        <span className="cost">{s ? fmtCost(s.cost_total) : "$0"}</span>
+        <span className="cost">{s ? fmtCost(s.cost_total) : "--"}</span>
         <span className="info-icon"
           onMouseEnter={() => onShowTooltip(true)}
           onMouseLeave={() => onShowTooltip(false)}>

@@ -21,7 +21,7 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
         // Read config once — clones are cheap, avoids holding the lock.
         let (projects_dir, pi_sessions_dir, usage_cache_dir, pricing, config_dir,
              tz, day_start_hour, week_start_day, repos_dir,
-             session_idle_timeout, refresh_interval) = {
+             session_idle_timeout, refresh_interval, git_history_days) = {
             let cfg = config.read().unwrap();
             (
                 cfg.projects_dir.clone(),
@@ -35,6 +35,7 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
                 cfg.settings.repos_dir.clone(),
                 cfg.settings.session_idle_timeout,
                 cfg.settings.refresh_interval,
+                cfg.settings.git_history_days,
             )
         };
 
@@ -54,40 +55,47 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
         let queue = app.state::<TaskQueue>();
 
         // ── Pre-fill SharedStats from daily_aggregates + commit_stats (<50ms first paint) ──
-        // Prefill only day — the fastest range. Week/month/year are filled in the
-        // first cycle via parallel background queries.
+        // Prefill all four ranges — queries against daily_aggregates / commit_stats are fast (<5ms).
         {
             let now_utc = Utc::now();
             let day_s_utc = now_utc.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
+            let week_s_utc = day_s_utc
+                - Duration::days(day_s_utc.weekday().num_days_from_monday() as i64);
+            let month_s_utc = now_utc.date_naive().with_day(1).unwrap().and_hms_opt(0, 0, 0).unwrap().and_utc();
+            let year_s_utc = now_utc.date_naive().with_month(1).unwrap().with_day(1).unwrap().and_hms_opt(0, 0, 0).unwrap().and_utc();
             let hi = now_utc.timestamp() as f64;
             let day_lo = day_s_utc.timestamp() as f64;
+            let week_lo = week_s_utc.timestamp() as f64;
+            let month_lo = month_s_utc.timestamp() as f64;
+            let year_lo = year_s_utc.timestamp() as f64;
             let day_utc_str = day_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
+            let week_utc_str = week_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
+            let month_utc_str = month_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
+            let year_utc_str = year_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
 
-            let (cost_total, cost_breakdown, tokens, sessions) = store.query_aggregates(&day_utc_str);
-            let source_breakdown = store.query_aggregate_source_breakdown(&day_utc_str);
-            let (loc_added, loc_deleted) = store.query_commit_totals(&day_utc_str);
-            let git_buckets_day = store.query_commit_buckets(day_lo, hi, 48);
-            let cost_buckets_day = store.query_cost_buckets(day_lo, hi, 48);
-            let token_buckets_day = store.query_token_buckets(day_lo, hi, 48);
+            // Prefill all four ranges from daily_aggregates — O(days), not O(git log).
+            let day   = build_one_range(&store, &now_utc.with_timezone(&tz), &now_utc.with_timezone(&tz), day_lo,   hi, &day_utc_str,   &day_utc_str,   7, "day");
+            let week  = build_one_range(&store, &now_utc.with_timezone(&tz), &now_utc.with_timezone(&tz), week_lo,  hi, &week_utc_str,  &week_utc_str,  7, "week");
+            let month = build_one_range(&store, &now_utc.with_timezone(&tz), &now_utc.with_timezone(&tz), month_lo, hi, &month_utc_str, &month_utc_str, 7, "month");
+            let year  = build_one_range(&store, &now_utc.with_timezone(&tz), &now_utc.with_timezone(&tz), year_lo,  hi, &year_utc_str,  &year_utc_str,  7, "year");
 
-            let has_data = store.is_initialized();
             let prefilled = AllStats {
-                ready: has_data,
-                day: RangeStats {
-                    loc_added, loc_deleted,
-                    cost_total, cost_breakdown, tokens,
-                    sessions_total: sessions,
-                    sessions_active: sessions,
-                    source_breakdown,
-                },
-                git_buckets_day, cost_buckets_day, token_buckets_day,
-                ..Default::default()
+                ready: store.is_initialized(),
+                day: day.stats, week: week.stats, month: month.stats, year: year.stats,
+                git_buckets_day: day.git_buckets,   git_buckets_week: week.git_buckets,
+                git_buckets_month: month.git_buckets, git_buckets_year: year.git_buckets,
+                cost_buckets_day: day.cost_buckets,   cost_buckets_week: week.cost_buckets,
+                cost_buckets_month: month.cost_buckets, cost_buckets_year: year.cost_buckets,
+                token_buckets_day: day.token_buckets,   token_buckets_week: week.token_buckets,
+                token_buckets_month: month.token_buckets, token_buckets_year: year.token_buckets,
+                time_labels_day: day.labels,   time_labels_week: week.labels,
+                time_labels_month: month.labels, time_labels_year: year.labels,
             };
 
             if let Ok(mut s) = stats.write() {
                 *s = prefilled;
             }
-            info!("Prefilled day stats from daily_aggregates (first paint <5ms)");
+            info!("Prefilled day/week/month/year stats from daily_aggregates");
         }
 
         // Run first refresh immediately, then loop on interval
@@ -152,11 +160,11 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
             // ── Incremental git scan ──
             // Query the latest commit timestamp in commit_stats, then scan only
             // repos that have new commits since then. On first cycle (empty table),
-            // fall back to the week-start window for a fast cold start.
+            // fall back to git_history_days from config (settings.json / LOCDOCK_GIT_HISTORY_DAYS).
             let git_start = std::time::Instant::now();
             let since_ts = store.latest_commit_ts()
                 .map(|ts| ts.min(now_utc))  // clamp future timestamps (e.g. from timezone-shifted old data)
-                .unwrap_or_else(|| now_utc - Duration::days(7));
+                .unwrap_or_else(|| now_utc - Duration::days(git_history_days as i64));
             let since_iso = since_ts.format("%Y-%m-%dT%H:%M:%S%z").to_string();
 
             let new_commits = git::collect_new_commits(&repos_dir, &since_iso);

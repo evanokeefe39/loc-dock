@@ -64,22 +64,27 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
             let day_date = day_s.format("%Y-%m-%d").to_string();
             let week_date = week_s.format("%Y-%m-%d").to_string();
 
-            let build_range = |date: &str| -> RangeStats {
+            // ponytail: prefill LOC from commit_stats for instant first paint.
+            let build_range = |date: &str, utc_str: &str| -> RangeStats {
                 let (cost_total, cost_breakdown, tokens, sessions) = store.query_aggregates(date);
                 let source_breakdown = store.query_aggregate_source_breakdown(date);
+                let (loc_added, loc_deleted) = store.query_commit_totals(utc_str);
                 RangeStats {
+                    loc_added, loc_deleted,
                     cost_total, cost_breakdown, tokens,
                     sessions_total: sessions,
                     sessions_active: sessions,  // approximate — active count updated on first full cycle
                     source_breakdown,
-                    ..Default::default()
                 }
             };
 
+            let day_date_utc = day_s.with_timezone(&Utc).format("%Y-%m-%d %H:%M:%S").to_string();
+            let week_date_utc = week_s.with_timezone(&Utc).format("%Y-%m-%d %H:%M:%S").to_string();
+
             let prefilled = AllStats {
                 ready: true,
-                day: build_range(&day_date),
-                week: build_range(&week_date),
+                day: build_range(&day_date, &day_date_utc),
+                week: build_range(&week_date, &week_date_utc),
                 ..Default::default()
             };
 

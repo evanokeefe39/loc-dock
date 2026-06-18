@@ -30,7 +30,10 @@ Three chart modes (click to toggle):
 - Resizable -- drag edges/corners to resize, responsive layout collapses at small sizes
 - Day/Week toggle for all stats
 - System tray with Show/Hide/Quit
-- Settings panel (cog icon) for repos dir, claude dir, timezone, day/week start
+- Settings panel (cog icon) with sticky save/back header
+- **Single-instance guard** -- PID lock file + named-mutex plugin prevents duplicate processes
+- **Config hot-reload** -- save settings without restarting the app
+- **LLM summaries** -- optional AI-generated commit summaries per repo (DeepSeek/OpenAI-compatible)
 - Customizable theme via YAML
 - Auto-creates default theme on first launch
 
@@ -137,8 +140,8 @@ flowchart LR
     subgraph "Rust backend"
         direction TB
         subgraph "Data loop (interval)"
-            git[git.rs + git_cache.rs]
-            usage[usage_store.rs<br/>DuckDB medallion ETL]
+            git[git.rs<br/>stateless git log]
+            usage[usage_store.rs<br/>DuckDB medallion ETL<br/>retry + WAL cleanup]
             data[data.rs]
         end
         subgraph "Summary loop (interval)"
@@ -185,20 +188,28 @@ JSON-parse memory.
 
 ### Control path
 
-The data loop scans git (`git.rs`, cached per-repo SHA/ts in `git_cache.rs`), runs the
-ETL, builds `AllStats` for day/week ranges, and writes it to a shared `RwLock`. The
-summary loop independently collects recent commits and calls an LLM for a written
+The data loop scans git (`git.rs`, stateless `git log --after=` on all repos every cycle),
+runs the ETL, builds `AllStats` for day/week ranges, and writes it to a shared `RwLock`.
+The summary loop independently collects recent commits and calls an LLM for a written
 summary, writing to its own shared state. Tauri commands (`get_stats`, `get_summary`)
 are `async` and only read shared state, so the dock stays responsive regardless of
 backend work.
 
+Both loops share a single DuckDB database handle (opened once in `lib.rs`, cloned via
+`try_clone()`). Config is stored as `Arc<RwLock<Config>>` — settings are saved to disk
+and instantly reloaded into shared state without restarting the process. The `restart_app`
+command is a no-op; under `npm run tauri dev` this keeps the dev watcher alive.
+
 ## How it works
 
-1. Data loop scans every git repo in `REPOS_DIR` for commits since week start (cached, incremental per repo)
-2. DuckDB ingests changed Claude/Pi JSONL files through bronze -> silver -> gold, deduped by message key
-3. Stats (tokens, cost, sessions, chart buckets) are precomputed for day and week and stored in shared state
-4. The summary loop separately summarizes recent commits via LLM into shared state
-5. Frontend polls `get_stats` / `get_summary` (~10s) and renders the active range -- no queries on toggle
+1. Single-instance check: PID lock file (`instance.lock`) + `tauri-plugin-single-instance`
+2. Data loop scans every git repo in `REPOS_DIR` for commits since week start (stateless `git log --after=`)
+3. DuckDB ingests changed Claude/Pi JSONL files through bronze → silver → gold, deduped by message key;
+   retries `Connection::open` with backoff and WAL cleanup if another process holds the lock
+4. Stats (tokens, cost, sessions, chart buckets) are precomputed for day and week and stored in shared state
+5. The summary loop separately summarizes recent commits via LLM into shared state
+6. Frontend polls `get_stats` / `get_summary` (~10s) and renders the active range -- no queries on toggle
+7. Settings save → config reloaded into `Arc<RwLock<Config>>` → background loops pick up changes on next cycle
 
 ## License
 

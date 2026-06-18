@@ -772,10 +772,13 @@ impl UsageStore {
         }
         let mut count = 0usize;
         for c in commits {
-            let ts_rfc = c.ts.to_rfc3339();
+            // ponytail: store UTC-naive timestamp to avoid timezone offset in epoch() queries.
+            // Convert FixedOffset to UTC, format without timezone suffix, then cast to TIMESTAMP.
+            let ts_utc = c.ts.with_timezone(&Utc);
+            let ts_str = ts_utc.format("%Y-%m-%d %H:%M:%S").to_string();
             match self.con.execute(
                 "INSERT OR IGNORE INTO commit_stats (repo, sha, ts, msg, added, deleted, file_ct) VALUES (?, ?, ?::TIMESTAMP, ?, ?, ?, ?)",
-                duckdb::params![repo, c.sha, ts_rfc, c.msg, c.added, c.deleted, c.file_count as i64],
+                duckdb::params![repo, c.sha, ts_str, c.msg, c.added, c.deleted, c.file_count as i64],
             ) {
                 Ok(n) => count += n as usize,
                 Err(e) => warn!("insert_commits: {}: {}", repo, e),

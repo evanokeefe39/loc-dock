@@ -7,8 +7,6 @@ Floating desktop widget that tracks your daily dev metrics at a glance.
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Tauri](https://img.shields.io/badge/tauri-v2-24C8D8?logo=tauri&logoColor=white)](https://tauri.app)
 [![React](https://img.shields.io/badge/react-19-61DAFB?logo=react&logoColor=white)](https://react.dev)
-[![TanStack Query](https://img.shields.io/badge/tanstack_query-5-FF4154?logo=reactquery&logoColor=white)](https://tanstack.com/query)
-[![Zustand](https://img.shields.io/badge/zustand-5-443E38?logo=react&logoColor=white)](https://zustand-demo.pmnd.rs)
 [![Rust](https://img.shields.io/badge/rust-2021-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![DuckDB](https://img.shields.io/badge/duckdb-bundled-FFF000?logo=duckdb&logoColor=black)](https://duckdb.org)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue)
@@ -126,56 +124,49 @@ You can maintain multiple theme files and switch between them via the settings p
 
 ## Architecture
 
-> See [docs/DATA_FLOWS.md](docs/DATA_FLOWS.md) for detailed end-to-end data flow
-> diagrams showing how each metric moves from source files to the dock UI.
-
-The Rust backend owns all data; the React frontend is a pure renderer. A single
-background loop runs git scan + DuckDB ETL + LLM summaries and writes results into
-shared in-memory state. The frontend polls that state via TanStack Query over async
-Tauri commands — it never touches data sources and never blocks on a slow backend.
-UI state (range, mode, panels) lives in a Zustand store accessible to any component
-without prop drilling.
+The Rust backend owns all data; the React frontend is a pure renderer. Two
+independent background loops compute stats and write them into shared in-memory
+state. The frontend polls that state via async Tauri commands -- it never touches
+data sources and never blocks on a slow backend.
 
 ```mermaid
 flowchart LR
     subgraph Sources
         GIT[Git repos]
         JSONL[Claude / Pi JSONL]
-        CONFIG[settings.json / theme.yaml]
+        ENV[.env config]
     end
 
     subgraph "Rust backend"
         direction TB
-        DUCKDB[(DuckDB
-                bronze/silver/gold
-                commit_stats)]
-        LOOP["Data loop (interval)
-              git log → insert_commits
-              ETL → refresh_aggregates
-              LLM summaries on change"]
-        STATE[(SharedStats / SharedSummary
-               Arc&lt;RwLock&gt;)]
-        CMDS[commands.rs · async handlers
-             get_stats · get_summary · get_theme]
+        subgraph "Data loop (interval)"
+            git[git.rs<br/>stateless git log]
+            usage[usage_store.rs<br/>DuckDB medallion ETL<br/>retry + WAL cleanup]
+            data[data.rs]
+        end
+        subgraph "Summary loop (interval)"
+            summary[summary.rs<br/>commits + LLM]
+        end
+        STATE[(SharedStats /<br/>SharedSummary<br/>RwLock)]
+        commands[commands.rs<br/>async handlers]
     end
 
     subgraph "React frontend"
-        TQ[TanStack Query
-           polling ~10s · isLoading built-in]
-        ZS[Zustand store
-           range · mode · panels
-           no prop drilling]
-        UI[TopRow · Chart · BottomRow
-           SummaryPanel · SettingsPanel]
+        hooks[hooks: useStats / useSummary]
+        App[App.tsx]
+        ui[TopRow · Chart · BottomRow<br/>SummaryPanel · SettingsPanel]
     end
 
-    GIT --> LOOP
-    JSONL --> DUCKDB --> LOOP
-    LOOP --> STATE
-    STATE --> CMDS
-    CMDS <-- "Tauri IPC" --> TQ
-    TQ --> UI
-    ZS --> UI
+    GIT --> git --> data
+    JSONL --> usage --> data
+    ENV --> data & summary
+    GIT --> summary
+
+    data --> STATE
+    summary --> STATE
+    STATE --> commands
+    commands <-- "Tauri IPC (poll ~10s)" --> hooks
+    hooks --> App --> ui
 ```
 
 ### Data path (medallion ETL)
@@ -183,12 +174,12 @@ flowchart LR
 `usage_store.rs` treats DuckDB as the ETL engine; Rust is thin orchestration. Session
 JSONL flows through three layers:
 
-- **Bronze** — ephemeral `read_ndjson_objects` CTE reads raw JSONL via glob with zero
+- **Bronze** -- ephemeral `read_ndjson_objects` CTE reads raw JSONL via glob with zero
   schema inference (auto-inference OOM-crashes on heterogeneous logs).
-- **Silver** — one `INSERT ... SELECT` per source maps bronze into the canonical
+- **Silver** -- one `INSERT ... SELECT` per source maps bronze into the canonical
   `entries` table: typed fields extracted by JSON path, cost flat-priced as a column,
   deduped by `(source, session_id, ts)`.
-- **Gold** — `daily_aggregates`, a materialized per-date/per-source rollup that the
+- **Gold** -- `daily_aggregates`, a materialized per-date/per-source rollup that the
   serving queries read.
 
 Ingestion is incremental: an `ingested_files (path, mtime, size)` registry means each
@@ -197,45 +188,28 @@ JSON-parse memory.
 
 ### Control path
 
-The data loop (`data.rs`) scans git incrementally (`git.rs`, queries `MAX(ts)` from
-`commit_stats`, runs `git log --after={ts}` — typically 0–5 new commits, <100ms),
-runs the ETL, and builds `AllStats` for day/week/month/year ranges into a shared
-`RwLock`. On each cycle it checks each repo's `head_sha` against the `repo_summaries`
-table and calls the LLM only for repos whose SHA changed — summaries are driven by the
-data loop, not an independent thread.
+The data loop scans git (`git.rs`, stateless `git log --after=` on all repos every cycle),
+runs the ETL, builds `AllStats` for day/week ranges, and writes it to a shared `RwLock`.
+The summary loop independently collects recent commits and calls an LLM for a written
+summary, writing to its own shared state. Tauri commands (`get_stats`, `get_summary`)
+are `async` and only read shared state, so the dock stays responsive regardless of
+backend work.
 
-Tauri commands (`get_stats`, `get_summary`) are `async` and only read shared state,
-so the dock stays responsive regardless of backend work. The frontend uses **TanStack
-Query** to poll those commands (~10s interval), providing built-in `isLoading` states,
-stale-while-revalidate, and cache dedup. **Zustand** holds UI-pure state (range, mode,
-panel visibility) so no component needs to thread props through the tree.
-
-The database connection is opened once in `lib.rs` and shared via `try_clone()`.
-Config is stored as `Arc<RwLock<Config>>` — settings save to disk and reload instantly
-without restarting. The `restart_app` command is a no-op; under `npm run tauri dev`
-this keeps the dev watcher alive.
+Both loops share a single DuckDB database handle (opened once in `lib.rs`, cloned via
+`try_clone()`). Config is stored as `Arc<RwLock<Config>>` — settings are saved to disk
+and instantly reloaded into shared state without restarting the process. The `restart_app`
+command is a no-op; under `npm run tauri dev` this keeps the dev watcher alive.
 
 ## How it works
 
-1. **Single-instance check** — PID lock file (`instance.lock`) + `tauri-plugin-single-instance`
-2. **Prefill** — On startup, the data loop queries `daily_aggregates` + `commit_stats` for all
-   four time ranges (day/week/month/year) and writes them to shared state. First paint in <50ms
-   with real data on warm start; shows loading spinner on cold start.
-3. **Incremental git scan** — Queries `MAX(ts)` from the `commit_stats` table, then runs
-   `git log --after={ts}` on each repo. Typically 0–5 new commits, <100ms total. Never
-   re-scans past commits.
-4. **DuckDB ETL** — Ingests changed Claude/Pi JSONL files through bronze → silver → gold.
-   Deduped by `(source, session_id, ts)`. Retries `Connection::open` with backoff and
-   WAL cleanup if the previous process crashed.
-5. **LLM summaries on change** — For each repo with new commits, checks `head_sha` against
-   the `repo_summaries` table. Only calls the LLM when SHA changed. Cached highlights are
-   served from the DB.
-6. **Frontend poll** — TanStack Query polls `get_stats` / `get_summary` every 10s.
-   Built-in `isLoading` states avoid the "zeros until loaded" problem. Background refetches
-   don't flash — stale data stays visible while the new fetch completes.
-7. **Settings hot-reload** — `save_settings` writes `settings.json` to disk and reloads
-   the shared `Arc<RwLock<Config>>`. Background loops pick up changes on the next cycle.
-   No restart needed.
+1. Single-instance check: PID lock file (`instance.lock`) + `tauri-plugin-single-instance`
+2. Data loop scans every git repo in `REPOS_DIR` for commits since week start (stateless `git log --after=`)
+3. DuckDB ingests changed Claude/Pi JSONL files through bronze → silver → gold, deduped by message key;
+   retries `Connection::open` with backoff and WAL cleanup if another process holds the lock
+4. Stats (tokens, cost, sessions, chart buckets) are precomputed for day and week and stored in shared state
+5. The summary loop separately summarizes recent commits via LLM into shared state
+6. Frontend polls `get_stats` / `get_summary` (~10s) and renders the active range -- no queries on toggle
+7. Settings save → config reloaded into `Arc<RwLock<Config>>` → background loops pick up changes on next cycle
 
 ## License
 

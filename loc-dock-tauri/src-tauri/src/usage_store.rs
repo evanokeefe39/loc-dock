@@ -10,7 +10,8 @@ use std::time::{Duration, SystemTime};
 
 const RETENTION_DAYS: f64 = 400.0;
 const DAY_SECS: f64 = 86400.0;
-/// Timeline resolution — must match `data.rs::N_BUCKETS` (frontend expects this many).
+/// Default timeline resolution for day view (48 × 30min buckets).
+#[cfg_attr(not(test), allow(dead_code))]
 const N_BUCKETS: usize = 48;
 const MARKER: &str = "usage_cache.db.reset";
 const SCHEMA_VERSION: &str = "9";  // v9: clean bad timezone-shifted commit_stats timestamps
@@ -505,27 +506,27 @@ fn ingest_files(con: &Connection, kind: SourceKind, paths: &[PathBuf], pricing: 
 }
 
 /// Build a timeline-bucketing query: assign each `entries` row in [lo, hi) to one
-/// of `N_BUCKETS` equal slices and aggregate `measures` per bucket. Params, in order:
-/// `lo`, `binsize` (=(hi-lo)/N_BUCKETS), `lo`, `hi`. Matches the Rust floor-index
+/// of `n_buckets` equal slices and aggregate `measures` per bucket. Params, in order:
+/// `lo`, `binsize` (=(hi-lo)/n_buckets), `lo`, `hi`. Matches the Rust floor-index
 /// convention (Spike 3 parity). Gaps are absent rows — the caller zero-fills.
-fn bucket_sql(measures: &str) -> String {
+fn bucket_sql(measures: &str, n_buckets: usize) -> String {
     format!(
         "SELECT LEAST(CAST(floor((epoch(ts) - ?) / ?) AS INT), {last}) AS bucket, {measures}
          FROM entries
          WHERE epoch(ts) >= ? AND epoch(ts) < ?
          GROUP BY bucket",
-        last = N_BUCKETS - 1, measures = measures,
+        last = n_buckets - 1, measures = measures,
     )
 }
 
 /// Same as `bucket_sql` but against the `commit_stats` table.
-fn commit_bucket_sql(measures: &str) -> String {
+fn commit_bucket_sql(measures: &str, n_buckets: usize) -> String {
     format!(
         "SELECT LEAST(CAST(floor((epoch(ts) - ?) / ?) AS INT), {last}) AS bucket, {measures}
          FROM commit_stats
          WHERE epoch(ts) >= ? AND epoch(ts) < ?
          GROUP BY bucket",
-        last = N_BUCKETS - 1, measures = measures,
+        last = n_buckets - 1, measures = measures,
     )
 }
 
@@ -714,21 +715,19 @@ impl UsageStore {
         }
     }
 
-    /// Cost timeline bucketed into `N_BUCKETS` equal time slices over [lo, hi)
-    /// (unix epoch seconds). Replaces the Rust `bucket_cost` loop — bucketing is
-    /// done in SQL (Spike 3 parity-verified). Returns exactly `N_BUCKETS` values,
-    /// gaps filled with 0. Uncached (Spike 5: ~6 ms).
-    pub fn query_cost_buckets(&self, lo: f64, hi: f64) -> Vec<f64> {
-        let binsize = (hi - lo) / N_BUCKETS as f64;
-        if !self.initialized || !(binsize > 0.0) { return vec![0.0; N_BUCKETS]; }
-        let mut out = vec![0.0f64; N_BUCKETS];
-        let sql = bucket_sql("SUM(total_cost)::DOUBLE");
+    /// Cost timeline bucketed into `n_buckets` equal time slices over [lo, hi)
+    /// (unix epoch seconds). Returns exactly `n_buckets` values, gaps filled with 0.
+    pub fn query_cost_buckets(&self, lo: f64, hi: f64, n_buckets: usize) -> Vec<f64> {
+        let binsize = (hi - lo) / n_buckets as f64;
+        if !self.initialized || !(binsize > 0.0) { return vec![0.0; n_buckets]; }
+        let mut out = vec![0.0f64; n_buckets];
+        let sql = bucket_sql("SUM(total_cost)::DOUBLE", n_buckets);
         match self.con.prepare(&sql) {
             Ok(mut stmt) => match stmt.query_map([lo, binsize, lo, hi], |row| {
                 Ok((row.get::<_, i64>(0)? as usize, row.get::<_, f64>(1)?))
             }) {
                 Ok(rows) => for r in rows.flatten() {
-                    if r.0 < N_BUCKETS { out[r.0] = r.1; }
+                    if r.0 < n_buckets { out[r.0] = r.1; }
                 },
                 Err(e) => warn!("Cost buckets: {}", e),
             },
@@ -737,16 +736,17 @@ impl UsageStore {
         out
     }
 
-    /// Token timeline bucketed into `N_BUCKETS` slices over [lo, hi) (unix epoch
-    /// seconds): (input, output, cache_creation, cache_read) per bucket. Replaces
-    /// the Rust `bucket_tokens` loop. Returns exactly `N_BUCKETS` tuples, gaps 0.
-    pub fn query_token_buckets(&self, lo: f64, hi: f64) -> Vec<(i64, i64, i64, i64)> {
-        let binsize = (hi - lo) / N_BUCKETS as f64;
-        if !self.initialized || !(binsize > 0.0) { return vec![(0, 0, 0, 0); N_BUCKETS]; }
-        let mut out = vec![(0i64, 0i64, 0i64, 0i64); N_BUCKETS];
+    /// Token timeline bucketed into `n_buckets` slices over [lo, hi) (unix epoch
+    /// seconds): (input, output, cache_creation, cache_read) per bucket. Returns
+    /// exactly `n_buckets` tuples, gaps 0.
+    pub fn query_token_buckets(&self, lo: f64, hi: f64, n_buckets: usize) -> Vec<(i64, i64, i64, i64)> {
+        let binsize = (hi - lo) / n_buckets as f64;
+        if !self.initialized || !(binsize > 0.0) { return vec![(0, 0, 0, 0); n_buckets]; }
+        let mut out = vec![(0i64, 0i64, 0i64, 0i64); n_buckets];
         let sql = bucket_sql(
             "SUM(input_tokens)::BIGINT, SUM(output_tokens)::BIGINT, \
              SUM(cache_creation_input_tokens)::BIGINT, SUM(cache_read_input_tokens)::BIGINT",
+            n_buckets,
         );
         match self.con.prepare(&sql) {
             Ok(mut stmt) => match stmt.query_map([lo, binsize, lo, hi], |row| {
@@ -757,7 +757,7 @@ impl UsageStore {
                 ))
             }) {
                 Ok(rows) => for r in rows.flatten() {
-                    if r.0 < N_BUCKETS { out[r.0] = (r.1, r.2, r.3, r.4); }
+                    if r.0 < n_buckets { out[r.0] = (r.1, r.2, r.3, r.4); }
                 },
                 Err(e) => warn!("Token buckets: {}", e),
             },
@@ -802,13 +802,13 @@ impl UsageStore {
             .and_then(|mut stmt| stmt.query_row([], |row| row.get(0)).ok())
     }
 
-    /// LOC timeline bucketed into `N_BUCKETS` slices over [lo, hi) (unix epoch secs).
+    /// LOC timeline bucketed into `n_buckets` slices over [lo, hi) (unix epoch secs).
     /// Returns (added, deleted) per bucket. Exact match for `bucket_git` in data.rs.
-    pub fn query_commit_buckets(&self, lo: f64, hi: f64) -> Vec<(i64, i64)> {
-        let binsize = (hi - lo) / N_BUCKETS as f64;
-        if !(binsize > 0.0) { return vec![(0, 0); N_BUCKETS]; }
-        let mut out = vec![(0i64, 0i64); N_BUCKETS];
-        let sql = commit_bucket_sql("SUM(added)::BIGINT, SUM(deleted)::BIGINT");
+    pub fn query_commit_buckets(&self, lo: f64, hi: f64, n_buckets: usize) -> Vec<(i64, i64)> {
+        let binsize = (hi - lo) / n_buckets as f64;
+        if !(binsize > 0.0) { return vec![(0, 0); n_buckets]; }
+        let mut out = vec![(0i64, 0i64); n_buckets];
+        let sql = commit_bucket_sql("SUM(added)::BIGINT, SUM(deleted)::BIGINT", n_buckets);
         match self.con.prepare(&sql) {
             Ok(mut stmt) => match stmt.query_map([lo, binsize, lo, hi], |row| {
                 Ok((
@@ -818,7 +818,7 @@ impl UsageStore {
                 ))
             }) {
                 Ok(rows) => for r in rows.flatten() {
-                    if r.0 < N_BUCKETS { out[r.0] = (r.1, r.2); }
+                    if r.0 < n_buckets { out[r.0] = (r.1, r.2); }
                 },
                 Err(e) => warn!("Commit buckets: {}", e),
             },
@@ -1154,7 +1154,7 @@ mod tests {
         let hi_f = hi.timestamp() as f64;
         let binsize = (hi_f - lo) / N_BUCKETS as f64;
 
-        let sql = commit_bucket_sql("SUM(added)::BIGINT, SUM(deleted)::BIGINT");
+        let sql = commit_bucket_sql("SUM(added)::BIGINT, SUM(deleted)::BIGINT", N_BUCKETS);
         let mut stmt = con.prepare(&sql).unwrap();
         let rows: Vec<(i64, i64)> = stmt.query_map([lo, binsize, lo, hi_f], |r| {
             Ok((r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
@@ -1199,7 +1199,7 @@ mod tests {
         let hi = lo + 3600.0;  // 1 hour window
         let binsize = (hi - lo) / N_BUCKETS as f64;
 
-        let sql = commit_bucket_sql("SUM(added)::BIGINT, SUM(deleted)::BIGINT");
+        let sql = commit_bucket_sql("SUM(added)::BIGINT, SUM(deleted)::BIGINT", N_BUCKETS);
         let mut stmt = con.prepare(&sql).unwrap();
         let rows: Vec<(i64, i64)> = stmt.query_map([lo, binsize, lo, hi], |r| {
             Ok((r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
@@ -1234,7 +1234,7 @@ mod tests {
         }
 
         let mut out = vec![0.0f64; N_BUCKETS];
-        let sql = bucket_sql("SUM(total_cost)::DOUBLE");
+        let sql = bucket_sql("SUM(total_cost)::DOUBLE", N_BUCKETS);
         let mut stmt = con.prepare(&sql).unwrap();
         let mapped = stmt.query_map([lo, binsize, lo, hi], |r| {
             Ok((r.get::<_, i64>(0)? as usize, r.get::<_, f64>(1)?))

@@ -54,79 +54,40 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
         let queue = app.state::<TaskQueue>();
 
         // ── Pre-fill SharedStats from daily_aggregates + commit_stats (<50ms first paint) ──
-        // Uses UTC midnight boundaries for all SQL queries. day_start_hour/timezone only
-        // affect frontend time labels, never query filters.
+        // Prefill only day — the fastest range. Week/month/year are filled in the
+        // first cycle via parallel background queries.
         {
             let now_utc = Utc::now();
             let day_s_utc = now_utc.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
-            let week_s_utc = day_s_utc
-                - Duration::days(day_s_utc.weekday().num_days_from_monday() as i64);
-            let month_s_utc = now_utc.date_naive().with_day(1).unwrap().and_hms_opt(0, 0, 0).unwrap().and_utc();
-            let year_s_utc = now_utc.date_naive().with_month(1).unwrap().with_day(1).unwrap().and_hms_opt(0, 0, 0).unwrap().and_utc();
-
-            let day_date = day_s_utc.format("%Y-%m-%d").to_string();
-            let week_date = week_s_utc.format("%Y-%m-%d").to_string();
-            let month_date = month_s_utc.format("%Y-%m-%d").to_string();
-            let year_date = year_s_utc.format("%Y-%m-%d").to_string();
-            let day_utc_str = day_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
-            let week_utc_str = week_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
-            let month_utc_str = month_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
-            let year_utc_str = year_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
-
-            // ponytail: prefill both totals AND bucket arrays so the graph renders instantly.
-            // Bucket queries are ~6ms each — negligible vs the 15s cycle.
             let hi = now_utc.timestamp() as f64;
             let day_lo = day_s_utc.timestamp() as f64;
-            let week_lo = week_s_utc.timestamp() as f64;
-            let month_lo = month_s_utc.timestamp() as f64;
-            let year_lo = year_s_utc.timestamp() as f64;
+            let day_utc_str = day_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
 
-            // Populate bucket arrays too so the graph shows data at paint time
-            let git_buckets_day = store.query_commit_buckets(day_lo, hi);
-            let git_buckets_week = store.query_commit_buckets(week_lo, hi);
-            let git_buckets_month = store.query_commit_buckets(month_lo, hi);
-            let git_buckets_year = store.query_commit_buckets(year_lo, hi);
-            let cost_buckets_day = store.query_cost_buckets(day_lo, hi);
-            let cost_buckets_week = store.query_cost_buckets(week_lo, hi);
-            let cost_buckets_month = store.query_cost_buckets(month_lo, hi);
-            let cost_buckets_year = store.query_cost_buckets(year_lo, hi);
-            let token_buckets_day = store.query_token_buckets(day_lo, hi);
-            let token_buckets_week = store.query_token_buckets(week_lo, hi);
-            let token_buckets_month = store.query_token_buckets(month_lo, hi);
-            let token_buckets_year = store.query_token_buckets(year_lo, hi);
+            let (cost_total, cost_breakdown, tokens, sessions) = store.query_aggregates(&day_utc_str);
+            let source_breakdown = store.query_aggregate_source_breakdown(&day_utc_str);
+            let (loc_added, loc_deleted) = store.query_commit_totals(&day_utc_str);
+            let git_buckets_day = store.query_commit_buckets(day_lo, hi, 48);
+            let cost_buckets_day = store.query_cost_buckets(day_lo, hi, 48);
+            let token_buckets_day = store.query_token_buckets(day_lo, hi, 48);
 
-            let build_range = |date: &str, utc_str: &str| -> RangeStats {
-                let (cost_total, cost_breakdown, tokens, sessions) = store.query_aggregates(date);
-                let source_breakdown = store.query_aggregate_source_breakdown(date);
-                let (loc_added, loc_deleted) = store.query_commit_totals(utc_str);
-                RangeStats {
-                    loc_added, loc_deleted,
-                    cost_total, cost_breakdown, tokens,
-                    sessions_total: sessions,
-                    sessions_active: sessions,  // approximate — active count updated on first full cycle
-                    source_breakdown,
-                }
-            };
-
-            // ponytail: ready=false on cold start so chart shows spinner during first cycle.
-            // On warm start (initialized=true), data exists → show immediately.
             let has_data = store.is_initialized();
             let prefilled = AllStats {
                 ready: has_data,
-                day: build_range(&day_date, &day_utc_str),
-                week: build_range(&week_date, &week_utc_str),
-                month: build_range(&month_date, &month_utc_str),
-                year: build_range(&year_date, &year_utc_str),
-                git_buckets_day, git_buckets_week, git_buckets_month, git_buckets_year,
-                cost_buckets_day, cost_buckets_week, cost_buckets_month, cost_buckets_year,
-                token_buckets_day, token_buckets_week, token_buckets_month, token_buckets_year,
+                day: RangeStats {
+                    loc_added, loc_deleted,
+                    cost_total, cost_breakdown, tokens,
+                    sessions_total: sessions,
+                    sessions_active: sessions,
+                    source_breakdown,
+                },
+                git_buckets_day, cost_buckets_day, token_buckets_day,
                 ..Default::default()
             };
 
             if let Ok(mut s) = stats.write() {
                 *s = prefilled;
             }
-            info!("Prefilled stats from daily_aggregates (first paint <50ms)");
+            info!("Prefilled day stats from daily_aggregates (first paint <5ms)");
         }
 
         // Run first refresh immediately, then loop on interval
@@ -308,6 +269,73 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
     });
 }
 
+// ── Per-range query helpers ─────────────────────────────────────────────
+
+struct RangeResult {
+    stats: RangeStats,
+    git_buckets: Vec<(i64, i64)>,
+    cost_buckets: Vec<f64>,
+    token_buckets: Vec<(i64, i64, i64, i64)>,
+    labels: TimeLabels,
+}
+
+/// Number of buckets per range. Day=48 (30min), week=7 (daily), month=days
+/// in month (daily), year=12 (monthly).
+fn n_buckets_for_range(range_type: &str, label: &DateTime<Tz>) -> usize {
+    match range_type {
+        "day" => 48,
+        "week" => 7,
+        "month" => {
+            let m = label.month();
+            let y = label.year();
+            let next = if m == 12 {
+                chrono::NaiveDate::from_ymd_opt(y + 1, 1, 1)
+            } else {
+                chrono::NaiveDate::from_ymd_opt(y, m + 1, 1)
+            };
+            let curr = chrono::NaiveDate::from_ymd_opt(y, m, 1).unwrap();
+            (next.unwrap() - curr).num_days() as usize
+        }
+        "year" => 12,
+        _ => 48,
+    }
+}
+
+/// Build stats for a single time range. Dispatches to the right bucket count
+/// depending on range_type (day=48, week/month=calendar days, year=months).
+fn build_one_range(
+    store: &UsageStore,
+    label: &DateTime<Tz>,
+    now_label: &DateTime<Tz>,
+    lo: f64,
+    hi: f64,
+    utc_str: &str,
+    active_str: &str,
+    day_start_hour: u32,
+    range_type: &str,
+) -> RangeResult {
+    let n = n_buckets_for_range(range_type, label);
+    let labels = compute_time_labels(label, now_label, range_type, day_start_hour);
+    let git_buckets = store.query_commit_buckets(lo, hi, n);
+    let (loc_added, loc_deleted) = store.query_commit_totals(utc_str);
+    let (cost_total, cost_breakdown, tokens, _sessions) = store.query_aggregates(utc_str);
+    let source_breakdown = store.query_aggregate_source_breakdown(utc_str);
+    let (sessions_total, sessions_active) = store.count_sessions(utc_str, active_str);
+    let cost_buckets = store.query_cost_buckets(lo, hi, n);
+    let token_buckets = store.query_token_buckets(lo, hi, n);
+
+    RangeResult {
+        stats: RangeStats {
+            loc_added, loc_deleted,
+            cost_total, cost_breakdown, tokens,
+            sessions_total, sessions_active,
+            source_breakdown,
+        },
+        git_buckets, cost_buckets, token_buckets,
+        labels,
+    }
+}
+
 // ponytail: timezone/day_start_hour only affects compute_time_labels (frontend).
 // All SQL query boundaries use pre-computed UTC-midnight values (day_lo, week_lo, etc.).
 fn build_all_stats(
@@ -329,96 +357,25 @@ fn build_all_stats(
     active_str: &str,
     day_start_hour: u32,
 ) -> AllStats {
-    // Time labels — use timezone-aware boundaries (frontend only)
-    let time_labels_week = compute_time_labels(week_s_label, now_label, "week", day_start_hour);
-    let time_labels_day = compute_time_labels(day_s_label, now_label, "day", day_start_hour);
-    let time_labels_month = compute_time_labels(month_s_label, now_label, "month", day_start_hour);
-    let time_labels_year = compute_time_labels(year_s_label, now_label, "year", day_start_hour);
-
-    // LOC buckets from commit_stats (SQL-backed, no Rust loop)
-    let git_buckets_week = store.query_commit_buckets(week_lo, hi);
-    let git_buckets_day = store.query_commit_buckets(day_lo, hi);
-    let git_buckets_month = store.query_commit_buckets(month_lo, hi);
-    let git_buckets_year = store.query_commit_buckets(year_lo, hi);
-
-    // LOC totals from commit_stats
-    let day_loc = store.query_commit_totals(day_utc_str);
-    let week_loc = store.query_commit_totals(week_utc_str);
-    let month_loc = store.query_commit_totals(month_utc_str);
-    let year_loc = store.query_commit_totals(year_utc_str);
-
-    // Day stats
-    let (day_cost_total, day_cost_breakdown, day_tokens, _day_sessions) = store.query_aggregates(day_utc_str);
-    let day_source_breakdown = store.query_aggregate_source_breakdown(day_utc_str);
-    let (day_sess_total, day_sess_active) = store.count_sessions(day_utc_str, active_str);
-    let day_cost_buckets = store.query_cost_buckets(day_lo, hi);
-    let day_token_buckets = store.query_token_buckets(day_lo, hi);
-
-    // Week stats
-    let (week_cost_total, week_cost_breakdown, week_tokens, _week_sessions) = store.query_aggregates(week_utc_str);
-    let week_source_breakdown = store.query_aggregate_source_breakdown(week_utc_str);
-    let (week_sess_total, week_sess_active) = store.count_sessions(week_utc_str, active_str);
-    let week_cost_buckets = store.query_cost_buckets(week_lo, hi);
-    let week_token_buckets = store.query_token_buckets(week_lo, hi);
-
-    // Month stats
-    let (month_cost_total, month_cost_breakdown, month_tokens, _month_sessions) = store.query_aggregates(month_utc_str);
-    let month_source_breakdown = store.query_aggregate_source_breakdown(month_utc_str);
-    let (month_sess_total, month_sess_active) = store.count_sessions(month_utc_str, active_str);
-    let month_cost_buckets = store.query_cost_buckets(month_lo, hi);
-    let month_token_buckets = store.query_token_buckets(month_lo, hi);
-
-    // Year stats
-    let (year_cost_total, year_cost_breakdown, year_tokens, _year_sessions) = store.query_aggregates(year_utc_str);
-    let year_source_breakdown = store.query_aggregate_source_breakdown(year_utc_str);
-    let (year_sess_total, year_sess_active) = store.count_sessions(year_utc_str, active_str);
-    let year_cost_buckets = store.query_cost_buckets(year_lo, hi);
-    let year_token_buckets = store.query_token_buckets(year_lo, hi);
+    let day   = build_one_range(store, day_s_label,   now_label, day_lo,   hi, day_utc_str,   active_str, day_start_hour, "day");
+    let week  = build_one_range(store, week_s_label,  now_label, week_lo,  hi, week_utc_str,  active_str, day_start_hour, "week");
+    let month = build_one_range(store, month_s_label, now_label, month_lo, hi, month_utc_str, active_str, day_start_hour, "month");
+    let year  = build_one_range(store, year_s_label,  now_label, year_lo,  hi, year_utc_str,  active_str, day_start_hour, "year");
 
     AllStats {
         ready: true,
-        day: RangeStats {
-            loc_added: day_loc.0, loc_deleted: day_loc.1,
-            cost_total: day_cost_total,
-            cost_breakdown: day_cost_breakdown,
-            tokens: day_tokens,
-            sessions_total: day_sess_total, sessions_active: day_sess_active,
-            source_breakdown: day_source_breakdown,
-        },
-        week: RangeStats {
-            loc_added: week_loc.0, loc_deleted: week_loc.1,
-            cost_total: week_cost_total,
-            cost_breakdown: week_cost_breakdown,
-            tokens: week_tokens,
-            sessions_total: week_sess_total, sessions_active: week_sess_active,
-            source_breakdown: week_source_breakdown,
-        },
-        month: RangeStats {
-            loc_added: month_loc.0, loc_deleted: month_loc.1,
-            cost_total: month_cost_total,
-            cost_breakdown: month_cost_breakdown,
-            tokens: month_tokens,
-            sessions_total: month_sess_total, sessions_active: month_sess_active,
-            source_breakdown: month_source_breakdown,
-        },
-        year: RangeStats {
-            loc_added: year_loc.0, loc_deleted: year_loc.1,
-            cost_total: year_cost_total,
-            cost_breakdown: year_cost_breakdown,
-            tokens: year_tokens,
-            sessions_total: year_sess_total, sessions_active: year_sess_active,
-            source_breakdown: year_source_breakdown,
-        },
-        git_buckets_day, git_buckets_week, git_buckets_month, git_buckets_year,
-        cost_buckets_day: day_cost_buckets,
-        cost_buckets_week: week_cost_buckets,
-        cost_buckets_month: month_cost_buckets,
-        cost_buckets_year: year_cost_buckets,
-        token_buckets_day: day_token_buckets,
-        token_buckets_week: week_token_buckets,
-        token_buckets_month: month_token_buckets,
-        token_buckets_year: year_token_buckets,
-        time_labels_day, time_labels_week, time_labels_month, time_labels_year,
+        day: day.stats,
+        week: week.stats,
+        month: month.stats,
+        year: year.stats,
+        git_buckets_day: day.git_buckets, git_buckets_week: week.git_buckets,
+        git_buckets_month: month.git_buckets, git_buckets_year: year.git_buckets,
+        cost_buckets_day: day.cost_buckets, cost_buckets_week: week.cost_buckets,
+        cost_buckets_month: month.cost_buckets, cost_buckets_year: year.cost_buckets,
+        token_buckets_day: day.token_buckets, token_buckets_week: week.token_buckets,
+        token_buckets_month: month.token_buckets, token_buckets_year: year.token_buckets,
+        time_labels_day: day.labels, time_labels_week: week.labels,
+        time_labels_month: month.labels, time_labels_year: year.labels,
     }
 }
 

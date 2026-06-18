@@ -678,43 +678,16 @@ html, body {
 }
 .settings-source-card {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  width: 140px;
-  cursor: default;
-}
-.settings-source-card.settings-add-card {
-  cursor: pointer;
-  border-style: dashed;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  color: var(--text-dim);
-  padding: 14px 10px;
-}
-.settings-source-card.settings-add-card:hover {
-  border-color: var(--text-dim);
-  color: var(--text);
-}
-.settings-source-add-icon {
-  width: 28px;
-  height: 28px;
-  border-radius: 6px;
-  border: 1px dashed var(--text-dim);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.settings-add-card-text {
-  font-size: var(--font-xs);
-}
-.settings-source-card-top {
-  display: flex;
   align-items: center;
   gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  width: 110px;
+  cursor: pointer;
+}
+.settings-source-card:hover {
+  border-color: var(--text-dim);
 }
 .settings-source-icon {
   width: 28px;
@@ -728,6 +701,7 @@ html, body {
 .settings-source-icon.pi { background: #6366f1; }
 .settings-source-icon.claude { background: #d97706; }
 .settings-source-icon.codex { background: #10a37f; }
+.settings-add-icon { background: none; color: var(--text-dim); border: 1px dashed var(--text-dim); }
 .settings-source-card-name {
   font-size: var(--font-xs);
   font-weight: 500;
@@ -735,27 +709,6 @@ html, body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.settings-source-card-actions {
-  display: flex;
-  gap: 2px;
-}
-.settings-card-btn {
-  background: none;
-  border: none;
-  cursor: pointer;
-  padding: 4px;
-  border-radius: 4px;
-  color: var(--text-dim);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.settings-card-btn:hover {
-  background: var(--border);
-  color: var(--text);
-}
-.settings-card-btn-del:hover {
-  background: color-mix(in srgb, var(--loc-del) 15%, transparent);
   color: var(--loc-del);
 }
 .settings-source-adapter {

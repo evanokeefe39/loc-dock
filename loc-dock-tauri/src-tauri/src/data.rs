@@ -53,16 +53,19 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
         let mut store = UsageStore::new(source_manager, &usage_cache_dir, pricing, &config_dir, con);
         let queue = app.state::<TaskQueue>();
 
-        // ── Pre-fill SharedStats from daily_aggregates (<50ms first paint) ──
-        // Read pre-computed day+week aggregates so the user sees real data immediately.
-        // Month/year are kept as Default (frontend still renders but shows 0s).
+        // ── Pre-fill SharedStats from daily_aggregates + commit_stats (<50ms first paint) ──
+        // Uses UTC midnight boundaries for all SQL queries. day_start_hour/timezone only
+        // affect frontend time labels, never query filters.
         {
-            let now_local = Utc::now().with_timezone(&tz);
-            let day_s = time_utils::day_start(&now_local, day_start_hour);
-            let week_s = time_utils::week_start(&now_local, day_start_hour, week_start_day);
+            let now_utc = Utc::now();
+            let day_s_utc = now_utc.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
+            let week_s_utc = day_s_utc
+                - Duration::days(day_s_utc.weekday().num_days_from_monday() as i64);
 
-            let day_date = day_s.format("%Y-%m-%d").to_string();
-            let week_date = week_s.format("%Y-%m-%d").to_string();
+            let day_date = day_s_utc.format("%Y-%m-%d").to_string();
+            let week_date = week_s_utc.format("%Y-%m-%d").to_string();
+            let day_utc_str = day_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
+            let week_utc_str = week_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
 
             // ponytail: prefill LOC from commit_stats for instant first paint.
             let build_range = |date: &str, utc_str: &str| -> RangeStats {
@@ -78,13 +81,10 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
                 }
             };
 
-            let day_date_utc = day_s.with_timezone(&Utc).format("%Y-%m-%d %H:%M:%S").to_string();
-            let week_date_utc = week_s.with_timezone(&Utc).format("%Y-%m-%d %H:%M:%S").to_string();
-
             let prefilled = AllStats {
                 ready: true,
-                day: build_range(&day_date, &day_date_utc),
-                week: build_range(&week_date, &week_date_utc),
+                day: build_range(&day_date, &day_utc_str),
+                week: build_range(&week_date, &week_utc_str),
                 ..Default::default()
             };
 
@@ -109,18 +109,31 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
                 let _ = app.emit("tasks-changed", ());
             }
 
-            let now_local = Utc::now().with_timezone(&tz);
+            // ── UTC midnight boundaries for all SQL queries ──
+            // day_start_hour/timezone only affect frontend labels, never query filters.
+            let now_utc = Utc::now();
+            let day_s_utc = now_utc.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
+            let week_s_utc = day_s_utc
+                - Duration::days(day_s_utc.weekday().num_days_from_monday() as i64);
+            let day_lo = day_s_utc.timestamp() as f64;
+            let week_lo = week_s_utc.timestamp() as f64;
+            let hi = now_utc.timestamp() as f64;
+            let day_utc_str = day_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
+            let week_utc_str = week_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
+
+            // ── Local timezone boundaries for frontend labels only ──
+            let now_local = now_utc.with_timezone(&tz);
+            let week_s_label = time_utils::week_start(&now_local, day_start_hour, week_start_day);
+            let day_s_label = time_utils::day_start(&now_local, day_start_hour);
 
             // ── Incremental git scan ──
             // Query the latest commit timestamp in commit_stats, then scan only
             // repos that have new commits since then. On first cycle (empty table),
             // fall back to the week-start window for a fast cold start.
-            let week_s = time_utils::week_start(&now_local, day_start_hour, week_start_day);
-            let day_s = time_utils::day_start(&now_local, day_start_hour);
-
             let git_start = std::time::Instant::now();
             let since_ts = store.latest_commit_ts()
-                .unwrap_or_else(|| Utc::now() - Duration::days(7));
+                .map(|ts| ts.min(now_utc))  // clamp future timestamps (e.g. from timezone-shifted old data)
+                .unwrap_or_else(|| now_utc - Duration::days(7));
             let since_iso = since_ts.format("%Y-%m-%dT%H:%M:%S%z").to_string();
 
             let new_commits = git::collect_new_commits(&repos_dir, &since_iso);
@@ -134,21 +147,20 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
             let new_commit_count: usize = new_commits.iter().map(|rc| rc.commits.len()).sum();
             let git_ms = git_start.elapsed().as_millis();
 
-            // Time window strings for day+week
-            let week_utc_str = week_s.with_timezone(&Utc).format("%Y-%m-%d %H:%M:%S").to_string();
-            let day_utc_str = day_s.with_timezone(&Utc).format("%Y-%m-%d %H:%M:%S").to_string();
-            let active_str = (Utc::now() - Duration::seconds(session_idle_timeout as i64))
+            let active_str = (now_utc - Duration::seconds(session_idle_timeout as i64))
                 .format("%Y-%m-%d %H:%M:%S")
                 .to_string();
 
             // ── Emit immediately with git data + aggregates (before slow ETL) ──
             // User sees LOC + cost/sessions in ~12s, not minutes.
+            // SQL queries use UTC-midnight lo/str; labels use timezone-aware day_s_label.
             macro_rules! emit {
                 () => {
                     let s = build_all_stats(
                         &store,
-                        &week_s, &day_s, &now_local,
-                        &week_utc_str, &day_utc_str, &active_str,
+                        &day_s_label, &week_s_label, &now_local,
+                        day_lo, week_lo, hi,
+                        &day_utc_str, &week_utc_str, &active_str,
                         day_start_hour,
                     );
                     if let Ok(mut locked) = stats.write() {
@@ -225,26 +237,24 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
     });
 }
 
-// ponytail: build_all_stats reads commit buckets from SQL (commit_stats table)
-// instead of Rust bucket loops. Day/week/month/year all from same table.
+// ponytail: timezone/day_start_hour only affects compute_time_labels (frontend).
+// All SQL query boundaries use pre-computed UTC-midnight values (day_lo, week_lo, etc.).
 fn build_all_stats(
     store: &UsageStore,
-    week_s: &DateTime<Tz>,
-    day_s: &DateTime<Tz>,
-    now: &DateTime<Tz>,
-    week_utc_str: &str,
+    day_s_label: &DateTime<Tz>,
+    week_s_label: &DateTime<Tz>,
+    now_label: &DateTime<Tz>,
+    day_lo: f64,
+    week_lo: f64,
+    hi: f64,
     day_utc_str: &str,
+    week_utc_str: &str,
     active_str: &str,
     day_start_hour: u32,
 ) -> AllStats {
-    // Time labels — day+week only
-    let time_labels_week = compute_time_labels(week_s, now, "week", day_start_hour);
-    let time_labels_day = compute_time_labels(day_s, now, "day", day_start_hour);
-
-    // Epoch bounds for SQL timeline bucketing
-    let day_lo = day_s.timestamp() as f64;
-    let week_lo = week_s.timestamp() as f64;
-    let hi = now.timestamp() as f64;
+    // Time labels — use timezone-aware boundaries (frontend only)
+    let time_labels_week = compute_time_labels(week_s_label, now_label, "week", day_start_hour);
+    let time_labels_day = compute_time_labels(day_s_label, now_label, "day", day_start_hour);
 
     // LOC buckets from commit_stats (SQL-backed, no Rust loop)
     let git_buckets_week = store.query_commit_buckets(week_lo, hi);

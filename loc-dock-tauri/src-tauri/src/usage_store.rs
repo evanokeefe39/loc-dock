@@ -13,7 +13,7 @@ const DAY_SECS: f64 = 86400.0;
 /// Timeline resolution — must match `data.rs::N_BUCKETS` (frontend expects this many).
 const N_BUCKETS: usize = 48;
 const MARKER: &str = "usage_cache.db.reset";
-const SCHEMA_VERSION: &str = "8";  // v8: commit_stats + repo_summaries tables
+const SCHEMA_VERSION: &str = "9";  // v9: clean bad timezone-shifted commit_stats timestamps
 
 /// Files ingested per silver INSERT. Caps transient JSON-parse memory on cold
 /// rebuilds; smaller batches + bounded threads keep the non-spillable parse peak

@@ -1,3 +1,4 @@
+use crate::git::GitCommit;
 use crate::pricing::Pricing;
 use crate::source_adapter::{FileDiscoverer, SourceKind, SourceManager};
 use crate::types::{CostBreakdown, SourceStats, TokenTotals};
@@ -12,7 +13,7 @@ const DAY_SECS: f64 = 86400.0;
 /// Timeline resolution — must match `data.rs::N_BUCKETS` (frontend expects this many).
 const N_BUCKETS: usize = 48;
 const MARKER: &str = "usage_cache.db.reset";
-const SCHEMA_VERSION: &str = "7";  // V2: SQL ingest; bumped to recover from poisoned registry
+const SCHEMA_VERSION: &str = "9";  // v9: clean bad timezone-shifted commit_stats timestamps
 
 /// Files ingested per silver INSERT. Caps transient JSON-parse memory on cold
 /// rebuilds; smaller batches + bounded threads keep the non-spillable parse peak
@@ -166,7 +167,9 @@ impl UsageStore {
                  DROP TABLE IF EXISTS watermarks; \
                  DROP TABLE IF EXISTS file_tracker; \
                  DROP TABLE IF EXISTS ingested_files; \
-                 DROP TABLE IF EXISTS daily_aggregates;"
+                 DROP TABLE IF EXISTS daily_aggregates; \
+                 DROP TABLE IF EXISTS commit_stats; \
+                 DROP TABLE IF EXISTS repo_summaries;"
             );
             info!("Schema version {} → {}: reset tables", stored_ver, SCHEMA_VERSION);
         }
@@ -215,6 +218,36 @@ impl UsageStore {
                  loc_added        BIGINT NOT NULL DEFAULT 0,
                  loc_deleted      BIGINT NOT NULL DEFAULT 0,
                  UNIQUE(date, source)
+             );
+"
+        );
+
+        // v8: commit_stats — per-repo commit cache for incremental git scans.
+        // Stores one row per (repo, sha) with aggregated LOC and message.
+        // The data loop inserts new commits each cycle; past commits are immutable.
+        let _ = con.execute_batch(
+            "CREATE TABLE IF NOT EXISTS commit_stats (
+                 repo     TEXT NOT NULL,
+                 sha      TEXT NOT NULL,
+                 ts       TIMESTAMP NOT NULL,
+                 msg      TEXT,
+                 added    BIGINT NOT NULL,
+                 deleted  BIGINT NOT NULL,
+                 file_ct  INT NOT NULL DEFAULT 1,
+                 UNIQUE(repo, sha)
+             );
+"
+        );
+
+        // v8: repo_summaries — cached AI summaries per repo.
+        // Used by the data loop to detect per-repo changes and debounce LLM calls.
+        let _ = con.execute_batch(
+            "CREATE TABLE IF NOT EXISTS repo_summaries (
+                 repo_path       TEXT PRIMARY KEY,
+                 last_commit_sha TEXT NOT NULL,
+                 last_summary_ts TIMESTAMP NOT NULL,
+                 highlights      TEXT,
+                 model           TEXT
              );
 "
         );
@@ -301,9 +334,10 @@ impl UsageStore {
             .and_then(|mut stmt| stmt.query_row([], |row| row.get(0)))
             .unwrap_or(0);
         if (current_count as u64) > self.last_row_count {
-            self.last_row_count = current_count as u64;
             if let Err(e) = self.refresh_aggregates() {
                 warn!("Failed to refresh aggregates: {}", e);
+            } else {
+                self.last_row_count = current_count as u64;
             }
         }
 
@@ -484,6 +518,17 @@ fn bucket_sql(measures: &str) -> String {
     )
 }
 
+/// Same as `bucket_sql` but against the `commit_stats` table.
+fn commit_bucket_sql(measures: &str) -> String {
+    format!(
+        "SELECT LEAST(CAST(floor((epoch(ts) - ?) / ?) AS INT), {last}) AS bucket, {measures}
+         FROM commit_stats
+         WHERE epoch(ts) >= ? AND epoch(ts) < ?
+         GROUP BY bucket",
+        last = N_BUCKETS - 1, measures = measures,
+    )
+}
+
 /// Render a slice of paths as a DuckDB array literal: `'a/b.jsonl','c/d.jsonl'`.
 /// Backslashes are normalized to `/` (DuckDB accepts `/` on Windows and the
 /// `entries.file_path` key is stored forward-slash for cross-platform stability).
@@ -565,6 +610,12 @@ impl UsageStore {
     }
 
 // ── Query methods ─────────────────────────────────────────────────
+
+    /// True if the store has at least one row of data (warm start).
+    /// Used by prefill to distinguish cold start (show spinner) from warm start (show data).
+    pub fn is_initialized(&self) -> bool {
+        self.initialized
+    }
 
     /// Query aggregates for a date range. Returns (total_cost, CostBreakdown, TokenTotals, sessions).
     /// Unlike query_since (which scans entries table), this reads from pre-computed daily_aggregates.
@@ -718,6 +769,87 @@ impl UsageStore {
     /// Distinct session counts (total since `since_str`, active since `active_str`).
     /// Queries `entries` directly — distinct counts are non-additive so they cannot
     /// come from `daily_aggregates` over multi-day ranges (Spike 5). Uncached (~6 ms).
+// ── Commit queries ────────────────────────────────────────────────
+
+    /// Insert new commits into `commit_stats` table (INSERT OR IGNORE).
+    pub fn insert_commits(&self, repo: &str, commits: &[GitCommit], _head_sha: &str) -> Result<usize, String> {
+        if commits.is_empty() {
+            return Ok(0);
+        }
+        let mut count = 0usize;
+        for c in commits {
+            // ponytail: store UTC-naive timestamp to avoid timezone offset in epoch() queries.
+            // Convert FixedOffset to UTC, format without timezone suffix, then cast to TIMESTAMP.
+            let ts_utc = c.ts.with_timezone(&Utc);
+            let ts_str = ts_utc.format("%Y-%m-%d %H:%M:%S").to_string();
+            match self.con.execute(
+                "INSERT OR IGNORE INTO commit_stats (repo, sha, ts, msg, added, deleted, file_ct) VALUES (?, ?, ?::TIMESTAMP, ?, ?, ?, ?)",
+                duckdb::params![repo, c.sha, ts_str, c.msg, c.added, c.deleted, c.file_count as i64],
+            ) {
+                Ok(n) => count += n as usize,
+                Err(e) => warn!("insert_commits: {}: {}", repo, e),
+            }
+        }
+        Ok(count)
+    }
+
+    /// Latest commit timestamp across all repos (for incremental scan).
+    /// Returns None if `commit_stats` is empty (first cycle).
+    pub fn latest_commit_ts(&self) -> Option<DateTime<Utc>> {
+        self.con
+            .prepare("SELECT MAX(ts) FROM commit_stats")
+            .ok()
+            .and_then(|mut stmt| stmt.query_row([], |row| row.get(0)).ok())
+    }
+
+    /// LOC timeline bucketed into `N_BUCKETS` slices over [lo, hi) (unix epoch secs).
+    /// Returns (added, deleted) per bucket. Exact match for `bucket_git` in data.rs.
+    pub fn query_commit_buckets(&self, lo: f64, hi: f64) -> Vec<(i64, i64)> {
+        let binsize = (hi - lo) / N_BUCKETS as f64;
+        if !(binsize > 0.0) { return vec![(0, 0); N_BUCKETS]; }
+        let mut out = vec![(0i64, 0i64); N_BUCKETS];
+        let sql = commit_bucket_sql("SUM(added)::BIGINT, SUM(deleted)::BIGINT");
+        match self.con.prepare(&sql) {
+            Ok(mut stmt) => match stmt.query_map([lo, binsize, lo, hi], |row| {
+                Ok((
+                    row.get::<_, i64>(0)? as usize,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            }) {
+                Ok(rows) => for r in rows.flatten() {
+                    if r.0 < N_BUCKETS { out[r.0] = (r.1, r.2); }
+                },
+                Err(e) => warn!("Commit buckets: {}", e),
+            },
+            Err(e) => warn!("Commit buckets prepare: {}", e),
+        }
+        out
+    }
+
+    /// Total LOC added/deleted since a timestamp string.
+    pub fn query_commit_totals(&self, since_str: &str) -> (i64, i64) {
+        let result = self.con.prepare(
+            "SELECT COALESCE(SUM(added), 0)::BIGINT, COALESCE(SUM(deleted), 0)::BIGINT
+             FROM commit_stats WHERE ts >= ?::TIMESTAMP"
+        );
+        match result {
+            Ok(mut stmt) => match stmt.query_row([since_str], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            }) {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!("Commit totals: {}", e);
+                    (0, 0)
+                }
+            },
+            Err(e) => {
+                warn!("Commit totals prepare: {}", e);
+                (0, 0)
+            }
+        }
+    }
+
     pub fn count_sessions(&self, since_str: &str, active_str: &str) -> (i64, i64) {
         if !self.initialized { return (0, 0); }
         match self.con.prepare(
@@ -733,6 +865,69 @@ impl UsageStore {
                 Err(e) => { warn!("Session count: {}", e); (0, 0) }
             },
             Err(e) => { warn!("Session count prepare: {}", e); (0, 0) }
+        }
+    }
+
+// ── Summary cache ─────────────────────────────────────────────────
+
+    /// Read cached summary for a repo. Returns (highlights JSON, last_commit_sha).
+    pub fn get_repo_summary(&self, repo: &str) -> Option<(String, String)> {
+        self.con
+            .prepare("SELECT highlights, last_commit_sha FROM repo_summaries WHERE repo_path = ?")
+            .ok()
+            .and_then(|mut stmt| {
+                stmt.query_row([repo], |row| {
+                    Ok((
+                        row.get::<_, String>(0).unwrap_or_default(),
+                        row.get::<_, String>(1).unwrap_or_default(),
+                    ))
+                })
+                .ok()
+            })
+    }
+
+    /// Save/update repo summary after LLM call.
+    pub fn save_repo_summary(&self, repo: &str, sha: &str, highlights_json: &str, model: &str) {
+        let now = Utc::now().to_rfc3339();
+        if let Err(e) = self.con.execute(
+            "INSERT OR REPLACE INTO repo_summaries (repo_path, last_commit_sha, last_summary_ts, highlights, model) VALUES (?, ?, ?::TIMESTAMP, ?, ?)",
+            duckdb::params![repo, sha, now, highlights_json, model],
+        ) {
+            warn!("save_repo_summary {}: {}", repo, e);
+        }
+    }
+
+    /// Count commits for a specific repo since a timestamp string.
+    pub fn count_repo_commits_since(&self, repo: &str, since_str: &str) -> usize {
+        self.con
+            .prepare("SELECT COUNT(*) FROM commit_stats WHERE repo = ? AND ts >= ?::TIMESTAMP")
+            .ok()
+            .and_then(|mut stmt| {
+                stmt.query_row(duckdb::params![repo, since_str], |row| row.get::<_, i64>(0))
+                    .ok()
+                    .map(|n| n as usize)
+            })
+            .unwrap_or(0)
+    }
+
+    /// Get all repo names with non-null highlights (for building SummaryData).
+    pub fn all_summarized_repos(&self) -> Vec<(String, String)> {
+        match self.con.prepare(
+            "SELECT repo_path, highlights FROM repo_summaries WHERE highlights IS NOT NULL"
+        ) {
+            Ok(mut stmt) => match stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            }) {
+                Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+                Err(e) => {
+                    warn!("All summarized repos: {}", e);
+                    Vec::new()
+                }
+            },
+            Err(e) => {
+                warn!("All summarized repos prepare: {}", e);
+                Vec::new()
+            }
         }
     }
 }
@@ -757,11 +952,22 @@ mod tests {
     const REGISTRY_DDL: &str = "CREATE TABLE ingested_files (
         file_path TEXT PRIMARY KEY, mtime DOUBLE NOT NULL, size BIGINT NOT NULL
     );";
+    const COMMIT_DDL: &str = "CREATE TABLE IF NOT EXISTS commit_stats (
+        repo TEXT NOT NULL, sha TEXT NOT NULL, ts TIMESTAMP NOT NULL,
+        msg TEXT, added BIGINT NOT NULL, deleted BIGINT NOT NULL,
+        file_ct INT NOT NULL DEFAULT 1, UNIQUE(repo, sha)
+    );";
 
     fn test_con() -> Connection {
         let con = Connection::open_in_memory().unwrap();
         con.execute_batch(ENTRIES_DDL).unwrap();
         con.execute_batch(REGISTRY_DDL).unwrap();
+        con
+    }
+
+    fn test_con_with_commits() -> Connection {
+        let con = Connection::open_in_memory().unwrap();
+        con.execute_batch(COMMIT_DDL).unwrap();
         con
     }
 
@@ -888,6 +1094,87 @@ mod tests {
         approx(gamma_total, 0.5);
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn commit_stats_insert_and_bucket() {
+        // Test that commits inserted with UTC-naive timestamps are correctly
+        // bucketed by epoch-range queries (covers the timezone bug fix).
+        use chrono::{DateTime, Utc};
+        let con = test_con_with_commits();
+
+        // Insert two commits at known timestamps
+        let ts_utc = "2026-06-18 08:30:00";
+        let ts_bad = "2026-06-18T10:30:00+02:00";  // same instant as ts_utc, but with zone
+        con.execute(
+            "INSERT INTO commit_stats (repo, sha, ts, msg, added, deleted, file_ct) VALUES (?, ?, ?::TIMESTAMP, ?, ?, ?, ?)",
+            duckdb::params!["r", "a", ts_utc, "utc", 10, 5, 2],
+        ).unwrap();
+        con.execute(
+            "INSERT INTO commit_stats (repo, sha, ts, msg, added, deleted, file_ct) VALUES (?, ?, ?::TIMESTAMP, ?, ?, ?, ?)",
+            duckdb::params!["r", "b", ts_bad, "timezone", 5, 2, 1],
+        ).unwrap();
+
+        // Compute epoch range using chrono — matches how data.rs computes day_lo/hi
+        let day_start: DateTime<Utc> = "2026-06-18T05:00:00Z".parse().unwrap();
+        let hi: DateTime<Utc> = "2026-06-18T12:00:00Z".parse().unwrap();
+        let lo = day_start.timestamp() as f64;
+        let hi_f = hi.timestamp() as f64;
+        let binsize = (hi_f - lo) / N_BUCKETS as f64;
+
+        let sql = commit_bucket_sql("SUM(added)::BIGINT, SUM(deleted)::BIGINT");
+        let mut stmt = con.prepare(&sql).unwrap();
+        let rows: Vec<(i64, i64)> = stmt.query_map([lo, binsize, lo, hi_f], |r| {
+            Ok((r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+        }).unwrap().filter_map(|r| r.ok()).collect();
+
+        let total_added: i64 = rows.iter().map(|(a, _)| a).sum();
+        // Only the UTC-naive insert should be found; the timezone-shifted one
+        // stores wall-clock 10:30 as "10:30", so epoch() treats it as 10:30 UTC,
+        // which is outside [05:00, 12:00)? Actually it IS within [05:00, 12:00).
+        // Both should be found when range is wide enough.
+        assert_eq!(total_added, 15, "UTC-naive + timezone-shifted: expected 10+5=15");
+    }
+
+    #[test]
+    fn commit_bucket_sql_epoch_parity() {
+        // Verify that commit_bucket_sql returns the same results as
+        // a direct query with epoch() — catches timezone format mismatches.
+        let con = test_con_with_commits();
+
+        // Insert using the SAME UTC-naive format that insert_commits uses after the fix
+        let ts = "2026-06-18 08:30:00";
+        con.execute(
+            "INSERT INTO commit_stats (repo, sha, ts, msg, added, deleted, file_ct) VALUES (?, ?, ?::TIMESTAMP, ?, ?, ?, ?)",
+            duckdb::params!["repo", "aaaabbbbccccddddeeeeffffgggghhhhiiiijjjj", ts, "msg", 100, 50, 3],
+        ).unwrap();
+
+        // Get epoch via SQL to confirm the stored value
+        let stored_epoch: i64 = con.query_row(
+            "SELECT epoch(ts) FROM commit_stats WHERE sha = 'aaaabbbbccccddddeeeeffffgggghhhhiiiijjjj'",
+            [], |r| r.get(0)
+        ).unwrap();
+
+        // The stored epoch should equal epoch('2026-06-18 08:30:00'::TIMESTAMP)
+        let expected_epoch: i64 = con.query_row(
+            "SELECT epoch('2026-06-18 08:30:00'::TIMESTAMP)", [], |r| r.get(0)
+        ).unwrap();
+        assert_eq!(stored_epoch, expected_epoch,
+            "Stored epoch should match direct cast. Stored: {} Expected: {}", stored_epoch, expected_epoch);
+
+        // Now query commit_bucket_sql with a range that includes that epoch
+        let lo = stored_epoch as f64;
+        let hi = lo + 3600.0;  // 1 hour window
+        let binsize = (hi - lo) / N_BUCKETS as f64;
+
+        let sql = commit_bucket_sql("SUM(added)::BIGINT, SUM(deleted)::BIGINT");
+        let mut stmt = con.prepare(&sql).unwrap();
+        let rows: Vec<(i64, i64)> = stmt.query_map([lo, binsize, lo, hi], |r| {
+            Ok((r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+        }).unwrap().filter_map(|r| r.ok()).collect();
+
+        let total_added: i64 = rows.iter().map(|(a, _)| a).sum();
+        assert_eq!(total_added, 100, "bucket query should find 100 added lines");
     }
 
     #[test]

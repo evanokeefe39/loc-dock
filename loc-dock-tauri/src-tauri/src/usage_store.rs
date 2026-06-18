@@ -924,6 +924,24 @@ impl UsageStore {
             .unwrap_or(0)
     }
 
+    /// Get all repo names that have commits in the table (for building SummaryData).
+    pub fn all_repos_with_commits(&self) -> Vec<String> {
+        match self.con.prepare("SELECT DISTINCT repo FROM commit_stats")
+        {
+            Ok(mut stmt) => match stmt.query_map([], |row| row.get::<_, String>(0)) {
+                Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+                Err(e) => {
+                    warn!("All repos: {}", e);
+                    Vec::new()
+                }
+            },
+            Err(e) => {
+                warn!("All repos prepare: {}", e);
+                Vec::new()
+            }
+        }
+    }
+
     /// Get all repo names with non-null highlights (for building SummaryData).
     pub fn all_summarized_repos(&self) -> Vec<(String, String)> {
         match self.con.prepare(

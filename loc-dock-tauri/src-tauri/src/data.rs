@@ -457,24 +457,39 @@ fn summary_llm_configured() -> bool {
     true
 }
 
-/// Build SummaryData from cached repo highlights + commit_stats counts.
+/// Build SummaryData from commit_stats (repos + counts + PRs) + cached highlights.
+/// Repos with commits but no cached highlights are included with empty highlights
+/// and `loading` is set to true so the panel shows "Summaries are being generated...".
 fn build_summary_data(store: &UsageStore, week_utc_str: &str, day_utc_str: &str) -> SummaryData {
-    let summarized = store.all_summarized_repos();
+    let all_repos = store.all_repos_with_commits();
+    let highlight_map: std::collections::HashMap<String, String> = store
+        .all_summarized_repos()
+        .into_iter()
+        .collect();
+
     let mut day_repos = Vec::new();
     let mut week_repos = Vec::new();
     let mut day_total = 0usize;
     let mut week_total = 0usize;
+    let mut any_missing_highlights = false;
 
-    for (repo, json) in &summarized {
-        let highlights: Vec<String> = serde_json::from_str(json).unwrap_or_default();
+    for repo in &all_repos {
         let week_count = store.count_repo_commits_since(repo, week_utc_str);
         let day_count = store.count_repo_commits_since(repo, day_utc_str);
+        if week_count == 0 && day_count == 0 { continue; }
 
-        // Extract PR numbers from commit messages
+        let cached_json = highlight_map.get(repo);
+        let highlights: Vec<String> = cached_json
+            .and_then(|j| serde_json::from_str(j).ok())
+            .unwrap_or_default();
+        let has_highlights = !highlights.is_empty();
+
         let day_msgs = store.repo_commit_messages_since(repo, day_utc_str);
         let week_msgs = store.repo_commit_messages_since(repo, week_utc_str);
-        let day_prs = extract_prs(&day_msgs);
-        let week_prs = extract_prs(&week_msgs);
+        let day_prs = if has_highlights { extract_prs(&day_msgs) } else { Vec::new() };
+        let week_prs = if has_highlights { extract_prs(&week_msgs) } else { Vec::new() };
+
+        if !has_highlights { any_missing_highlights = true; }
 
         if week_count > 0 {
             week_repos.push(summary::RepoSummary {
@@ -510,7 +525,7 @@ fn build_summary_data(store: &UsageStore, week_utc_str: &str, day_utc_str: &str)
         week_repo_count: week_count,
         week_commits: week_total,
         week_prs: week_prs_total,
-        loading: false,
+        loading: any_missing_highlights,
         no_api_key: false,
     }
 }

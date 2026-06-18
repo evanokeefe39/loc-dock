@@ -247,6 +247,92 @@ abcd1234abcd1234abcd1234abcd1234abcd1234|2024-06-01T00:00:00Z|Initial commit
     }
 
     #[test]
+    fn real_git_repo_scan() {
+        // Create a real git repo with a commit, then scan it.
+        let dir = std::env::temp_dir().join(format!(
+            "locdock_git_test_{}",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Init git repo
+        let init = Command::new("git")
+            .args(["init"])
+            .current_dir(&dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(init.status.success(), "git init failed");
+
+        // Configure user (required for commit on some systems)
+        let _ = Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&dir)
+            .output();
+        let _ = Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&dir)
+            .output();
+
+        // Create a file and commit it
+        let file_path = dir.join("test.rs");
+        std::fs::write(&file_path, "fn main() {}\nfn new_func() {}\n").unwrap();
+
+        let add = Command::new("git")
+            .args(["add", "test.rs"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(add.status.success(), "git add failed");
+
+        let commit = Command::new("git")
+            .args(["commit", "-m", "Initial commit with test.rs"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(commit.status.success(), "git commit failed: {}",
+            String::from_utf8_lossy(&commit.stderr));
+
+        // Also verify get_head_sha works
+        let sha = get_head_sha(&dir);
+        assert!(sha.is_some(), "get_head_sha should return a SHA");
+        assert_eq!(sha.unwrap().len(), 40, "SHA should be 40 hex chars");
+
+        // Now run collect_new_commits with a wide window
+        let parent = dir.parent().unwrap();
+        let since_7d_ago = "1970-01-01T00:00:00+0000";
+        let results = collect_new_commits(parent, since_7d_ago);
+
+        // We should find the repo and its one commit
+        let repo_name = dir.file_name().unwrap().to_string_lossy();
+        let our_repo = results.iter().find(|rc| rc.repo == repo_name);
+        assert!(our_repo.is_some(), "Should find repo '{}' in results. Found: {:?}",
+            repo_name, results.iter().map(|r| r.repo.as_str()).collect::<Vec<_>>());
+
+        let rc = our_repo.unwrap();
+        assert_eq!(rc.commits.len(), 1, "Should have 1 commit");
+        assert_eq!(rc.commits[0].msg, "Initial commit with test.rs");
+        assert!(rc.commits[0].added > 0, "LOC added should be > 0, got {}", rc.commits[0].added);
+        assert_eq!(rc.commits[0].file_count, 1, "Should have 1 file");
+        assert_eq!(rc.commits[0].sha.len(), 40, "SHA should be 40 chars");
+
+        // Also test with the EXACT same since_iso format used in data.rs (DateTime<Utc> format)
+        use chrono::{DateTime, Utc, Duration};
+        let since_dt: DateTime<Utc> = Utc::now() - Duration::days(7);
+        let since_fmt = since_dt.format("%Y-%m-%dT%H:%M:%S%z").to_string();
+        assert!(since_fmt.contains("+0000") || since_fmt.contains("Z"),
+            "Utc format should produce +0000 or Z, got: {}", since_fmt);
+
+        let results2 = collect_new_commits(parent, &since_fmt);
+        let our_repo2 = results2.iter().find(|rc| rc.repo == repo_name);
+        assert!(our_repo2.is_some(), "Should find repo with data.rs format '{}'", since_fmt);
+        assert_eq!(our_repo2.unwrap().commits.len(), 1, "Should have 1 commit with data.rs format");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_parse_git_commits_msg_with_pipe() {
         // Commit message contains "|" — splitn(3, '|') should keep it.
         let output = "\

@@ -119,7 +119,9 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
             let since_iso = since_ts.format("%Y-%m-%dT%H:%M:%S%z").to_string();
 
             let new_commits = git::collect_new_commits(&repos_dir, &since_iso);
+            info!("Git scan: {} repos with new commits (since_iso={})", new_commits.len(), since_iso);
             for rc in &new_commits {
+                info!("  repo='{}' head_sha={} commits={}", rc.repo, &rc.head_sha[..8.min(rc.head_sha.len())], rc.commits.len());
                 if let Err(e) = store.insert_commits(&rc.repo, &rc.commits, &rc.head_sha) {
                     warn!("Store commits for {}: {}", rc.repo, e);
                 }

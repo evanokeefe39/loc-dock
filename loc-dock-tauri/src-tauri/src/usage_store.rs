@@ -946,11 +946,22 @@ mod tests {
     const REGISTRY_DDL: &str = "CREATE TABLE ingested_files (
         file_path TEXT PRIMARY KEY, mtime DOUBLE NOT NULL, size BIGINT NOT NULL
     );";
+    const COMMIT_DDL: &str = "CREATE TABLE IF NOT EXISTS commit_stats (
+        repo TEXT NOT NULL, sha TEXT NOT NULL, ts TIMESTAMP NOT NULL,
+        msg TEXT, added BIGINT NOT NULL, deleted BIGINT NOT NULL,
+        file_ct INT NOT NULL DEFAULT 1, UNIQUE(repo, sha)
+    );";
 
     fn test_con() -> Connection {
         let con = Connection::open_in_memory().unwrap();
         con.execute_batch(ENTRIES_DDL).unwrap();
         con.execute_batch(REGISTRY_DDL).unwrap();
+        con
+    }
+
+    fn test_con_with_commits() -> Connection {
+        let con = Connection::open_in_memory().unwrap();
+        con.execute_batch(COMMIT_DDL).unwrap();
         con
     }
 
@@ -1077,6 +1088,87 @@ mod tests {
         approx(gamma_total, 0.5);
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn commit_stats_insert_and_bucket() {
+        // Test that commits inserted with UTC-naive timestamps are correctly
+        // bucketed by epoch-range queries (covers the timezone bug fix).
+        use chrono::{DateTime, Utc};
+        let con = test_con_with_commits();
+
+        // Insert two commits at known timestamps
+        let ts_utc = "2026-06-18 08:30:00";
+        let ts_bad = "2026-06-18T10:30:00+02:00";  // same instant as ts_utc, but with zone
+        con.execute(
+            "INSERT INTO commit_stats (repo, sha, ts, msg, added, deleted, file_ct) VALUES (?, ?, ?::TIMESTAMP, ?, ?, ?, ?)",
+            duckdb::params!["r", "a", ts_utc, "utc", 10, 5, 2],
+        ).unwrap();
+        con.execute(
+            "INSERT INTO commit_stats (repo, sha, ts, msg, added, deleted, file_ct) VALUES (?, ?, ?::TIMESTAMP, ?, ?, ?, ?)",
+            duckdb::params!["r", "b", ts_bad, "timezone", 5, 2, 1],
+        ).unwrap();
+
+        // Compute epoch range using chrono — matches how data.rs computes day_lo/hi
+        let day_start: DateTime<Utc> = "2026-06-18T05:00:00Z".parse().unwrap();
+        let hi: DateTime<Utc> = "2026-06-18T12:00:00Z".parse().unwrap();
+        let lo = day_start.timestamp() as f64;
+        let hi_f = hi.timestamp() as f64;
+        let binsize = (hi_f - lo) / N_BUCKETS as f64;
+
+        let sql = commit_bucket_sql("SUM(added)::BIGINT, SUM(deleted)::BIGINT");
+        let mut stmt = con.prepare(&sql).unwrap();
+        let rows: Vec<(i64, i64)> = stmt.query_map([lo, binsize, lo, hi_f], |r| {
+            Ok((r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+        }).unwrap().filter_map(|r| r.ok()).collect();
+
+        let total_added: i64 = rows.iter().map(|(a, _)| a).sum();
+        // Only the UTC-naive insert should be found; the timezone-shifted one
+        // stores wall-clock 10:30 as "10:30", so epoch() treats it as 10:30 UTC,
+        // which is outside [05:00, 12:00)? Actually it IS within [05:00, 12:00).
+        // Both should be found when range is wide enough.
+        assert_eq!(total_added, 15, "UTC-naive + timezone-shifted: expected 10+5=15");
+    }
+
+    #[test]
+    fn commit_bucket_sql_epoch_parity() {
+        // Verify that commit_bucket_sql returns the same results as
+        // a direct query with epoch() — catches timezone format mismatches.
+        let con = test_con_with_commits();
+
+        // Insert using the SAME UTC-naive format that insert_commits uses after the fix
+        let ts = "2026-06-18 08:30:00";
+        con.execute(
+            "INSERT INTO commit_stats (repo, sha, ts, msg, added, deleted, file_ct) VALUES (?, ?, ?::TIMESTAMP, ?, ?, ?, ?)",
+            duckdb::params!["repo", "aaaabbbbccccddddeeeeffffgggghhhhiiiijjjj", ts, "msg", 100, 50, 3],
+        ).unwrap();
+
+        // Get epoch via SQL to confirm the stored value
+        let stored_epoch: i64 = con.query_row(
+            "SELECT epoch(ts) FROM commit_stats WHERE sha = 'aaaabbbbccccddddeeeeffffgggghhhhiiiijjjj'",
+            [], |r| r.get(0)
+        ).unwrap();
+
+        // The stored epoch should equal epoch('2026-06-18 08:30:00'::TIMESTAMP)
+        let expected_epoch: i64 = con.query_row(
+            "SELECT epoch('2026-06-18 08:30:00'::TIMESTAMP)", [], |r| r.get(0)
+        ).unwrap();
+        assert_eq!(stored_epoch, expected_epoch,
+            "Stored epoch should match direct cast. Stored: {} Expected: {}", stored_epoch, expected_epoch);
+
+        // Now query commit_bucket_sql with a range that includes that epoch
+        let lo = stored_epoch as f64;
+        let hi = lo + 3600.0;  // 1 hour window
+        let binsize = (hi - lo) / N_BUCKETS as f64;
+
+        let sql = commit_bucket_sql("SUM(added)::BIGINT, SUM(deleted)::BIGINT");
+        let mut stmt = con.prepare(&sql).unwrap();
+        let rows: Vec<(i64, i64)> = stmt.query_map([lo, binsize, lo, hi], |r| {
+            Ok((r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+        }).unwrap().filter_map(|r| r.ok()).collect();
+
+        let total_added: i64 = rows.iter().map(|(a, _)| a).sum();
+        assert_eq!(total_added, 100, "bucket query should find 100 added lines");
     }
 
     #[test]

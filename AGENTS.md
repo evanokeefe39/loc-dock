@@ -4,13 +4,15 @@
 
 The data layer was rewritten (commits `55a12df`..`4c234e8`, schema v6). DuckDB is the
 ETL engine; Rust is thin orchestration. See [`docs/REFACTOR_PLAN_V2.md`](docs/REFACTOR_PLAN_V2.md)
-for the full plan and spike results.
+for the full plan and spike results, and [`docs/DATA_FLOWS.md`](docs/DATA_FLOWS.md)
+for detailed end-to-end data flow diagrams.
 
 ### Single data loop (no independent summary loop)
 
 - `data.rs::spawn_data_loop` — git scan + DuckDB ETL + AI summaries. Builds `AllStats`
-  (day/week) into `SharedStats` (`Arc<RwLock<AllStats>>`). Prefills day/week from
-  `daily_aggregates` for <50ms first paint. Sleeps `refresh_interval.max(10)`s.
+  (day/week/month/year) into `SharedStats` (`Arc<RwLock<AllStats>>`). Prefills all
+  four ranges from `daily_aggregates` for <50ms first paint. Sleeps
+  `refresh_interval.max(10)`s.
 - **Incremental git scan** — `commit_stats` table (`repo, sha, ts, msg, added, deleted`)
   stores per-commit data. Each cycle queries `MAX(ts)` from the table and runs
   `git log --after={ts}` — typically 0–5 new commits → <100ms vs 7.6s re-scanning
@@ -21,8 +23,11 @@ for the full plan and spike results.
 - **No independent summary loop** — `summary.rs` only contains types (`RepoSummary`,
   `SummaryData`), LLM helper functions, and `reset_summaries`. The old
   `spawn_summary_loop` (with its own git scan, debounce, and SHA tracking) is removed.
-- Frontend hooks (`useStats`, `useSummary`) poll `get_stats` / `get_summary` every ~10s.
-  Commands are `async` and only read shared state — they never block the UI.
+- **Frontend**: TanStack Query polls `get_stats` / `get_summary` every ~10s.
+  Built-in `isLoading` / `isFetching` states replace the hand-rolled hooks and the
+  backend `ready` flag for UI state. Zustand holds UI-pure state (range, mode, panel
+  visibility) — no prop drilling. Commands are `async` and only read shared state —
+  they never block the UI.
 
 ### Medallion ETL (`usage_store.rs`):
 
@@ -62,6 +67,19 @@ for the full plan and spike results.
   the old `app.restart()` killed the dev watcher, leaving an orphaned app.
 - The data loop re-reads config each cycle via a `read_config()` closure — API key,
   model, and endpoint changes are picked up live without restart.
+
+## Lessons Learned
+
+1. **Establish data architecture early.** DuckDB + medallion (bronze/silver/gold)
+   handles ETL, JSON parsing, aggregation, and bucketing natively. The first version
+   did all of this in Rust (~2,239 LOC of ETL core where ~500 would do). DuckDB is the
+   ETL engine; Rust is thin orchestration around it.
+
+2. **Use industry-standard dashboard stack.** TanStack Query handles polling,
+   loading/error states, stale-while-revalidate, and cache dedup out of the box.
+   Zustand eliminates prop drilling. The project previously hand-rolled all of this
+   in custom React hooks + useState, reinventing wheels that come free with the
+   standard stack.
 
 ## Gotchas & Hard Constraints
 
@@ -132,6 +150,9 @@ schema v8.
 | `src/config.rs` | `.env` settings load + settings.json persistence | `LOCDOCK_*` |
 | `src/theme.rs` | YAML theme load | multi-document support |
 | `src/tray.rs` | System tray | — |
+| `loc-dock-tauri/src/hooks/queries.ts` | TanStack Query hooks: `useStatsQuery`, `useSummaryQuery`, `useThemeQuery` | polling interval 10s; event-driven summary cache updates |
+| `loc-dock-tauri/src/lib/store.ts` | Zustand store: range, mode, tooltip/settings/summary visibility | no prop drilling; components import `useUIStore` directly |
+| `loc-dock-tauri/src/components/*.tsx` | React components: TopRow, Chart, BottomRow, SummaryPanel, SettingsPanel, CostTooltip | — |
 
 ## Quick Reference
 

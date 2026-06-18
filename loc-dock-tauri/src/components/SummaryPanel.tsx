@@ -1,7 +1,8 @@
-import { useState, useRef, useCallback, ReactNode } from "react";
+import { useState, useRef, useCallback, useEffect, ReactNode } from "react";
 import { SummaryData, TimeRange } from "../lib/types";
 
 const REF_PATTERN = /(#\d+|[A-Z][A-Z0-9]+-\d+)/g;
+const SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
 
 function formatHighlight(text: string): ReactNode {
   const parts = text.split(REF_PATTERN);
@@ -21,6 +22,7 @@ interface Props {
 
 export function SummaryPanel({ summary, range, hideNoPrs }: Props) {
   const [height, setHeight] = useState(100);
+  const [spinnerFrame, setSpinnerFrame] = useState(0);
   const dragging = useRef(false);
   const startY = useRef(0);
   const startH = useRef(0);
@@ -34,6 +36,12 @@ export function SummaryPanel({ summary, range, hideNoPrs }: Props) {
   const hasRepos = repos.length > 0;
   const hasHighlights = repos.some(r => r.highlights.length > 0);
   const awaitingSummary = hasRepos && !hasHighlights && !summary.no_api_key;
+
+  useEffect(() => {
+    if (!summary.loading) return;
+    const id = setInterval(() => setSpinnerFrame(f => (f + 1) % SPINNER_FRAMES.length), 80);
+    return () => clearInterval(id);
+  }, [summary.loading]);
 
   const onResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -64,7 +72,7 @@ export function SummaryPanel({ summary, range, hideNoPrs }: Props) {
       </div>
       <div className="summary-body" style={{ height }}>
         {summary.loading || awaitingSummary ? (
-          <span className="summary-empty">Summaries are being generated...</span>
+          <span className="summary-empty">{SPINNER_FRAMES[spinnerFrame]} loading...</span>
         ) : summary.no_api_key ? (
           <span className="summary-empty">Configure LLM API key in Settings to enable AI summaries</span>
         ) : !hasRepos ? (

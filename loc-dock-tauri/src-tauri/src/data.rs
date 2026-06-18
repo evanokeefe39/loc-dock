@@ -140,6 +140,25 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
             let day_utc_str = day_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
             let week_utc_str = week_s_utc.format("%Y-%m-%d %H:%M:%S").to_string();
 
+            // ── Emit summary state while git scan runs ──
+            // On cold start no cached data → emit loading ("Summaries are being generated...")
+            // instead of "No commits yet today" during the 15s initial cycle.
+            // On warm start cached data exists → emit immediately (no loading flash).
+            let cached = store.all_summarized_repos();
+            if cached.is_empty() {
+                let loading_summary = SummaryData {
+                    loading: true,
+                    ..Default::default()
+                };
+                let _ = app.emit("summary-update", &loading_summary);
+                if let Ok(mut g) = summary_state.write() { *g = loading_summary; }
+            } else {
+                let data = build_summary_data(&store, &week_utc_str, &day_utc_str);
+                let data = SummaryData { no_api_key: !summary_llm_configured(), ..data };
+                if let Ok(mut g) = summary_state.write() { *g = data.clone(); }
+                let _ = app.emit("summary-update", &data);
+            }
+
             // ── Local timezone boundaries for frontend labels only ──
             let now_local = now_utc.with_timezone(&tz);
             let week_s_label = time_utils::week_start(&now_local, day_start_hour, week_start_day);

@@ -678,21 +678,22 @@ html, body {
 }
 .settings-source-card {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  min-width: 170px;
-  flex: 1 0 auto;
+  width: 140px;
   cursor: default;
 }
 .settings-source-card.settings-add-card {
   cursor: pointer;
   border-style: dashed;
+  align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: 4px;
   color: var(--text-dim);
+  padding: 14px 10px;
 }
 .settings-source-card.settings-add-card:hover {
   border-color: var(--text-dim);
@@ -707,10 +708,18 @@ html, body {
   align-items: center;
   justify-content: center;
 }
+.settings-add-card-text {
+  font-size: var(--font-xs);
+}
+.settings-source-card-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .settings-source-icon {
-  width: 36px;
-  height: 36px;
-  border-radius: 8px;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -719,15 +728,8 @@ html, body {
 .settings-source-icon.pi { background: #6366f1; }
 .settings-source-icon.claude { background: #d97706; }
 .settings-source-icon.codex { background: #10a37f; }
-.settings-source-card-body {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 0;
-  flex: 1;
-}
 .settings-source-card-name {
-  font-size: var(--font-sm);
+  font-size: var(--font-xs);
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;

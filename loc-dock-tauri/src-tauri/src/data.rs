@@ -69,7 +69,7 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
         // Build discoverers from data sources config — no hardcoded paths.
         let source_pairs: Vec<_> = config.read().unwrap()
             .settings.data_sources.iter()
-            .filter(|s| s.enabled)
+
             .filter_map(|s| {
                 let kind = SourceKind::from_str(&s.adapter)?;
                 let discoverer = GlobFileDiscoverer::new(s.path.clone(), kind.skip_subdirs());

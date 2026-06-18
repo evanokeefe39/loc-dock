@@ -168,12 +168,12 @@ pub async fn remove_source(app: AppHandle, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn toggle_source(app: AppHandle, id: String) -> Result<(), String> {
+pub async fn update_source(app: AppHandle, id: String, source: DataSourceConfig) -> Result<(), String> {
     let state = app.state::<Arc<RwLock<Config>>>();
     let mut cfg = state.write().unwrap();
     let src = cfg.settings.data_sources.iter_mut().find(|s| s.id == id)
         .ok_or_else(|| format!("Source '{}' not found", id))?;
-    src.enabled = !src.enabled;
+    *src = source;
     cfg.settings.save(&cfg.config_dir)
 }
 

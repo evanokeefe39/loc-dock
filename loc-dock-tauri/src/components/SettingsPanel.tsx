@@ -97,6 +97,7 @@ export function SettingsPanel({ visible, onClose }: Props) {
     path: '',
     enabled: true,
   });
+  const [editingSource, setEditingSource] = useState<DataSourceConfig | null>(null);
   const original = useRef<string>("");
 
   useEffect(() => {
@@ -176,15 +177,18 @@ export function SettingsPanel({ visible, onClose }: Props) {
     }
   };
 
-  const handleToggleSource = async (id: string) => {
+  const handleSaveSource = async () => {
+    if (!editingSource) return;
     try {
-      await invoke('toggle_source', { id });
+      await invoke('update_source', { id: editingSource.id, source: editingSource });
       const s = await invoke<Settings>('get_settings');
       setSettings(s);
       original.current = JSON.stringify(s);
       setDirty(false);
+      setEditingSource(null);
     } catch (e) {
-      console.error('Failed to toggle source:', e);
+      console.error('Failed to update source:', e);
+      alert('Failed to update source: ' + e);
     }
   };
 
@@ -342,9 +346,7 @@ export function SettingsPanel({ visible, onClose }: Props) {
           <table className="settings-sources-table">
             <thead>
               <tr>
-                <th>Type</th>
                 <th>Name</th>
-                <th>Path</th>
                 <th></th>
                 <th></th>
               </tr>
@@ -352,16 +354,14 @@ export function SettingsPanel({ visible, onClose }: Props) {
             <tbody>
               {settings.data_sources.map(source => (
                 <tr key={source.id}>
-                  <td><span className="settings-source-adapter">{source.adapter}</span></td>
                   <td className="settings-source-name">{source.display_name}</td>
-                  <td className="settings-source-path">{source.path}</td>
                   <td>
-                    <input
-                      type="checkbox"
-                      checked={source.enabled}
-                      onChange={() => handleToggleSource(source.id)}
-                      title="Enabled"
-                    />
+                    <button
+                      className="settings-edit-source-btn"
+                      onClick={() => setEditingSource(source)}
+                    >
+                      edit
+                    </button>
                   </td>
                   <td>
                     <button
@@ -376,6 +376,31 @@ export function SettingsPanel({ visible, onClose }: Props) {
               ))}
             </tbody>
           </table>
+        )}
+
+        {editingSource && (
+          <div className="settings-edit-modal">
+            <label>
+              <span>Type</span>
+              <select value={editingSource.adapter} onChange={e => setEditingSource({...editingSource, adapter: e.target.value})}>
+                <option value="pi">Pi</option>
+                <option value="claude">Claude Code</option>
+                <option value="codex">Codex CLI</option>
+              </select>
+            </label>
+            <label>
+              <span>Display name</span>
+              <input value={editingSource.display_name} onChange={e => setEditingSource({...editingSource, display_name: e.target.value})} />
+            </label>
+            <label>
+              <span>Session directory</span>
+              <input value={editingSource.path} onChange={e => setEditingSource({...editingSource, path: e.target.value})} />
+            </label>
+            <div className="settings-add-source-actions">
+              <button className="settings-action-btn settings-action-primary" onClick={handleSaveSource}>Save</button>
+              <button className="settings-action-btn" onClick={() => setEditingSource(null)}>Cancel</button>
+            </div>
+          </div>
         )}
 
         {DATA_ROWS.map(row => (

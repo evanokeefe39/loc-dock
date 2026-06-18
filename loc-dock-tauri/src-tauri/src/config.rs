@@ -75,11 +75,6 @@ impl Config {
             .join("loc-dock")
     }
 
-    /// Only enabled data sources.
-    pub fn active_data_sources(&self) -> Vec<&DataSourceConfig> {
-        self.settings.data_sources.iter().filter(|s| s.enabled).collect()
-    }
-
     /// Resolve the model pricing file path: user override → bundled resource.
     pub fn resolve_pricing_path(&self) -> Option<PathBuf> {
         self.settings.model_pricing_path.clone()
@@ -115,14 +110,12 @@ impl Settings {
                                     adapter: "claude".to_string(),
                                     display_name: "Claude Code".to_string(),
                                     path: cd.join("projects"),
-                                    enabled: true,
                                 },
                                 DataSourceConfig {
                                     id: "pi-main".to_string(),
                                     adapter: "pi".to_string(),
                                     display_name: "Pi".to_string(),
                                     path: pd.join("agent").join("sessions"),
-                                    enabled: true,
                                 },
                             ];
                             migrated = true;
@@ -191,14 +184,12 @@ impl Settings {
                     adapter: "claude".to_string(),
                     display_name: "Claude Code".to_string(),
                     path: cd.join("projects"),
-                    enabled: true,
                 },
                 DataSourceConfig {
                     id: "pi-main".to_string(),
                     adapter: "pi".to_string(),
                     display_name: "Pi".to_string(),
                     path: pd.join("agent").join("sessions"),
-                    enabled: true,
                 },
             ],
             timezone: std::env::var("LOCDOCK_TIMEZONE")
@@ -268,14 +259,12 @@ impl Default for Settings {
                     adapter: "claude".to_string(),
                     display_name: "Claude Code".to_string(),
                     path: cd.join("projects"),
-                    enabled: true,
                 },
                 DataSourceConfig {
                     id: "pi-main".to_string(),
                     adapter: "pi".to_string(),
                     display_name: "Pi".to_string(),
                     path: pd.join("agent").join("sessions"),
-                    enabled: true,
                 },
             ],
             timezone: default_timezone(),

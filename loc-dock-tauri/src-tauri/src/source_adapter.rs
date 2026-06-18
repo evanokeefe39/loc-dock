@@ -50,12 +50,6 @@ pub struct DataSourceConfig {
     pub adapter: String, // "pi", "claude", "codex"
     pub display_name: String,
     pub path: PathBuf,
-    #[serde(default = "default_enabled")]
-    pub enabled: bool,
-}
-
-fn default_enabled() -> bool {
-    true
 }
 
 // ── Glob-based file discoverer ────────────────────────────────────────────

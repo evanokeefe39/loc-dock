@@ -338,32 +338,45 @@ export function SettingsPanel({ visible, onClose }: Props) {
           </div>
         )}
 
-        {settings.data_sources && settings.data_sources.map(source => (
-          <div key={source.id} className="settings-source-row">
-            <div className="settings-source-info">
-              <span className="settings-source-adapter">{source.adapter}</span>
-              <span className="settings-source-name">{source.display_name}</span>
-              <span className="settings-source-path">{source.path}</span>
-            </div>
-            <div className="settings-source-actions">
-              <label className="settings-toggle">
-                <input
-                  type="checkbox"
-                  checked={source.enabled}
-                  onChange={() => handleToggleSource(source.id)}
-                />
-                Enabled
-              </label>
-              <button
-                className="settings-delete-source-btn"
-                onClick={() => handleRemoveSource(source.id)}
-                title="Remove this source"
-              >
-                Delete
-              </button>
-            </div>
-          </div>
-        ))}
+        {settings.data_sources && settings.data_sources.length > 0 && (
+          <table className="settings-sources-table">
+            <thead>
+              <tr>
+                <th>Type</th>
+                <th>Name</th>
+                <th>Path</th>
+                <th></th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {settings.data_sources.map(source => (
+                <tr key={source.id}>
+                  <td><span className="settings-source-adapter">{source.adapter}</span></td>
+                  <td className="settings-source-name">{source.display_name}</td>
+                  <td className="settings-source-path">{source.path}</td>
+                  <td>
+                    <input
+                      type="checkbox"
+                      checked={source.enabled}
+                      onChange={() => handleToggleSource(source.id)}
+                      title="Enabled"
+                    />
+                  </td>
+                  <td>
+                    <button
+                      className="settings-delete-source-btn"
+                      onClick={() => handleRemoveSource(source.id)}
+                      title="Remove this source"
+                    >
+                      x
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
 
         {DATA_ROWS.map(row => (
           <div key={row.key} className="settings-data-row">
@@ -411,14 +424,23 @@ export function SettingsPanel({ visible, onClose }: Props) {
 
         <hr className="settings-data-divider" />
 
-        <label title="Path to a LiteLLM-format pricing JSON to override bundled prices. Leave empty for bundled defaults.">
-          <span>Pricing override (optional)</span>
-          <input
-            value={settings.model_pricing_path ?? ''}
-            onChange={e => update('model_pricing_path', e.target.value || null)}
-            placeholder="~/.config/loc-dock/litellm.json"
-          />
-        </label>
+        <div className="settings-data-row">
+          <label>
+            <span>Pricing override</span>
+            <input
+              value={settings.model_pricing_path ?? ''}
+              onChange={e => update('model_pricing_path', e.target.value || null)}
+              placeholder="~/.config/loc-dock/litellm.json"
+            />
+          </label>
+          <button
+            className="settings-inline-reset"
+            onClick={() => { update('model_pricing_path', null); }}
+            title="Use bundled pricing defaults"
+          >
+            reset
+          </button>
+        </div>
 
         {/* ── AI Summaries ── */}
         <div className="settings-section-heading">AI Summaries</div>

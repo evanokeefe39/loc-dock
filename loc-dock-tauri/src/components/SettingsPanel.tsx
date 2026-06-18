@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Save } from "lucide-react";
+import { Save, Pencil, Trash2 } from "lucide-react";
 
 interface DataSourceConfig {
   id: string;
@@ -343,39 +343,30 @@ export function SettingsPanel({ visible, onClose }: Props) {
         )}
 
         {settings.data_sources && settings.data_sources.length > 0 && (
-          <table className="settings-sources-table">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th></th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {settings.data_sources.map(source => (
-                <tr key={source.id}>
-                  <td className="settings-source-name">{source.display_name}</td>
-                  <td>
-                    <button
-                      className="settings-edit-source-btn"
-                      onClick={() => setEditingSource(source)}
-                    >
-                      edit
-                    </button>
-                  </td>
-                  <td>
-                    <button
-                      className="settings-delete-source-btn"
-                      onClick={() => handleRemoveSource(source.id)}
-                      title="Remove this source"
-                    >
-                      x
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div className="settings-sources-gallery">
+            {settings.data_sources.map(source => (
+              <div key={source.id} className="settings-source-card">
+                <div className={`settings-source-icon ${source.adapter}`}>
+                  {source.adapter === 'pi' ? (
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><text x="12" y="16" textAnchor="middle" fontSize="12" fill="currentColor">π</text></svg>
+                  ) : source.adapter === 'claude' ? (
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+                  ) : (
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="3" y1="3" x2="9" y2="9"/></svg>
+                  )}
+                </div>
+                <span className="settings-source-card-name">{source.display_name}</span>
+                <div className="settings-source-card-actions">
+                  <button className="settings-card-btn" onClick={() => setEditingSource(source)} title="Edit">
+                    <Pencil size={13} />
+                  </button>
+                  <button className="settings-card-btn settings-card-btn-del" onClick={() => handleRemoveSource(source.id)} title="Remove">
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
         )}
 
         {editingSource && (

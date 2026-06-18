@@ -692,25 +692,66 @@ html, body {
 .settings-action-primary:hover:not(:disabled) {
   background: color-mix(in srgb, var(--loc-add) 80%, black);
 }
-.settings-sources-table {
-  width: 100%;
-  border-collapse: collapse;
-  margin: 4px 0;
-  font-size: var(--font-xs);
+.settings-sources-gallery {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 4px 0 8px;
 }
-.settings-sources-table th {
-  text-align: left;
-  padding: 2px 6px;
-  color: var(--text-dim);
+.settings-source-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  min-width: 180px;
+  flex: 1 0 auto;
+}
+.settings-source-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.settings-source-icon.pi { background: #6366f1; color: #fff; }
+.settings-source-icon.claude { background: #d97706; color: #fff; }
+.settings-source-icon.codex { background: #059669; color: #fff; }
+.settings-source-card-name {
+  flex: 1;
+  font-size: var(--font-sm);
   font-weight: 500;
-  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.settings-sources-table td {
-  padding: 3px 6px;
-  border-bottom: 1px solid var(--border);
-  vertical-align: middle;
+.settings-source-card-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
 }
-.settings-sources-table tr:last-child td { border-bottom: none; }
+.settings-card-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.settings-card-btn:hover {
+  background: var(--border);
+  color: var(--text);
+}
+.settings-card-btn-del:hover {
+  background: color-mix(in srgb, var(--loc-del) 15%, transparent);
+  color: var(--loc-del);
+}
 .settings-source-adapter {
   font-size: var(--font-xs);
   color: var(--text-dim);

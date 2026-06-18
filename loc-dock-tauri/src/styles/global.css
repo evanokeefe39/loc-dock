@@ -586,8 +586,9 @@ html, body {
   cursor: pointer;
   font-family: inherit;
   font-size: var(--font-xs);
-  padding: 1px 6px;
+  padding: 2px 6px;
   flex-shrink: 0;
+  line-height: 1;
 }
 .settings-inline-reset:hover { background: var(--loc-del); color: var(--bg); }
 

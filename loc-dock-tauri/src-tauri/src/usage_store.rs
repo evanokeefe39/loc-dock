@@ -897,6 +897,20 @@ impl UsageStore {
         }
     }
 
+    /// Get commit messages for a repo since a timestamp (for PR extraction).
+    pub fn repo_commit_messages_since(&self, repo: &str, since_str: &str) -> Vec<String> {
+        self.con
+            .prepare("SELECT msg FROM commit_stats WHERE repo = ? AND ts >= ?::TIMESTAMP ORDER BY ts")
+            .ok()
+            .map(|mut stmt| {
+                stmt.query_map(duckdb::params![repo, since_str], |row| row.get::<_, String>(0))
+                    .ok()
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+    }
+
     /// Count commits for a specific repo since a timestamp string.
     pub fn count_repo_commits_since(&self, repo: &str, since_str: &str) -> usize {
         self.con

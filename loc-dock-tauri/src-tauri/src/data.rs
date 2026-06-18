@@ -227,14 +227,14 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
                 if let Ok(mut g) = summary_state.write() { *g = data.clone(); }
                 let _ = app.emit("summary-update", &data);
             } else {
-                // No new commits or no API key — emit loaded-but-empty so loading:true stops spinning
-                let empty = SummaryData {
-                    loading: false,
+                // No new commits — emit cached summaries so the panel shows data immediately on warm start
+                let data = build_summary_data(&store, &week_utc_str, &day_utc_str);
+                let data = SummaryData {
                     no_api_key: !summary_llm_configured(),
-                    ..Default::default()
+                    ..data
                 };
-                if let Ok(mut g) = summary_state.write() { *g = empty.clone(); }
-                let _ = app.emit("summary-update", &empty);
+                if let Ok(mut g) = summary_state.write() { *g = data.clone(); }
+                let _ = app.emit("summary-update", &data);
             }
 
             // ── Per-source ETL: emit after each provider completes ──
@@ -435,6 +435,22 @@ fn compute_time_labels(
 
 // ── Summary helpers (moved from summary.rs) ────────────────────────
 
+/// Extract PR references like (#123) from commit messages.
+fn extract_prs(msgs: &[String]) -> Vec<String> {
+    let re = regex::Regex::new(r"\(#(\d+)\)").expect("invalid PR regex");
+    let mut seen = std::collections::HashSet::new();
+    let mut prs = Vec::new();
+    for msg in msgs {
+        for cap in re.captures_iter(msg) {
+            let pr = format!("PR-{}", &cap[1]);
+            if seen.insert(pr.clone()) {
+                prs.push(pr);
+            }
+        }
+    }
+    prs
+}
+
 /// Check if any LLM API key is configured (summary enabled is implied).
 fn summary_llm_configured() -> bool {
     // ponytail: returns true; actual key check happens in the loop body.
@@ -454,11 +470,17 @@ fn build_summary_data(store: &UsageStore, week_utc_str: &str, day_utc_str: &str)
         let week_count = store.count_repo_commits_since(repo, week_utc_str);
         let day_count = store.count_repo_commits_since(repo, day_utc_str);
 
+        // Extract PR numbers from commit messages
+        let day_msgs = store.repo_commit_messages_since(repo, day_utc_str);
+        let week_msgs = store.repo_commit_messages_since(repo, week_utc_str);
+        let day_prs = extract_prs(&day_msgs);
+        let week_prs = extract_prs(&week_msgs);
+
         if week_count > 0 {
             week_repos.push(summary::RepoSummary {
                 name: repo.clone(),
                 commits: week_count,
-                prs: Vec::new(),
+                prs: week_prs,
                 highlights: highlights.clone(),
             });
             week_total += week_count;
@@ -467,7 +489,7 @@ fn build_summary_data(store: &UsageStore, week_utc_str: &str, day_utc_str: &str)
             day_repos.push(summary::RepoSummary {
                 name: repo.clone(),
                 commits: day_count,
-                prs: Vec::new(),
+                prs: day_prs,
                 highlights,
             });
             day_total += day_count;
@@ -476,15 +498,18 @@ fn build_summary_data(store: &UsageStore, week_utc_str: &str, day_utc_str: &str)
 
     let day_count = day_repos.len();
     let week_count = week_repos.len();
+    let week_prs_total: usize = week_repos.iter().map(|r| r.prs.len()).sum();
+    let day_prs_total: usize = day_repos.iter().map(|r| r.prs.len()).sum();
+
     SummaryData {
         day_repos,
         day_repo_count: day_count,
         day_commits: day_total,
-        day_prs: 0,
+        day_prs: day_prs_total,
         week_repos,
         week_repo_count: week_count,
         week_commits: week_total,
-        week_prs: 0,
+        week_prs: week_prs_total,
         loading: false,
         no_api_key: false,
     }

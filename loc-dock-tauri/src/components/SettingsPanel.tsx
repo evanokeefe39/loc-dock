@@ -434,7 +434,6 @@ export function SettingsPanel({ visible, onClose }: Props) {
           </div>
         )}
 
-        <hr className="settings-data-divider" />
 
         <div className="settings-data-row">
           <label>

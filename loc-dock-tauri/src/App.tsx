@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { useStatsQuery, useSummaryQuery, useThemeQuery, applyTheme, DEFAULT_THEME } from "./hooks/queries";
 import { SummaryPanel } from "./components/SummaryPanel";
 import { NotificationBanner } from "./components/NotificationBanner";
@@ -33,15 +33,18 @@ function App() {
     if (theme) applyTheme(theme);
   }, [theme]);
 
-  // The Rust side already shows + positions the window at startup
+  // Signal to Rust that React has mounted, so it can show the window.
+  // The window was positioned (bottom-right) in Rust setup() but kept
+  // hidden to avoid WebView2 navigation errors. We also set the initial
+  // size and snap to corner here.
   useEffect(() => {
     if (shown.current) return;
     shown.current = true;
-    const win = getCurrentWindow();
-    win.show().catch(() => {});
-    win.setSize(new LogicalSize(500, 340))
+    getCurrentWindow()
+      .setSize(new LogicalSize(500, 340))
       .then(() => invoke("snap_to_corner", { corner: "bottom-right" }))
       .catch(() => {});
+    emit("frontend-ready", {}).catch(() => {});
   }, []);
 
   // Fetch hideNoPrs setting once on mount (setting is stable during a session)

@@ -17,8 +17,6 @@ pub struct ModelPricing {
     pub cache_read_input_token_cost: f64,
     #[serde(default)]
     pub cache_creation_input_token_cost: f64,
-    #[serde(default)]
-    pub litellm_provider: Option<String>,
 }
 
 impl Default for ModelPricing {
@@ -29,22 +27,8 @@ impl Default for ModelPricing {
             output_cost_per_token: 0.0000006,
             cache_read_input_token_cost: 0.000000075,
             cache_creation_input_token_cost: 0.00000015,
-            litellm_provider: Some("openai".to_string()),
         }
     }
-}
-
-/// Per-million-token costs for a single model, converted from LiteLLM's
-/// per-token values. Returned by [`Pricing::get_per_million`].
-#[derive(Debug, Clone)]
-pub struct ModelCost {
-    pub input_price: f64,
-    pub output_price: f64,
-    pub cache_write_price: f64,
-    pub cache_read_price: f64,
-    /// "estimated" for all models until a provider reports actual costs
-    /// in their session logs. Schema column `entries.cost_type`.
-    pub cost_type: &'static str,
 }
 
 /// Pricing loaded from LiteLLM's model_prices_and_context_window.json.
@@ -58,11 +42,6 @@ pub struct ModelCost {
 /// community-maintained model map (2,784+ models across all providers).
 #[derive(Debug, Clone)]
 pub struct Pricing {
-    models: HashMap<String, ModelPricing>,
-    default: ModelPricing,
-
-    /// Flat per-million-token defaults (from gpt-4o-mini or first model in map).
-    /// Used by `usage_store.rs::format_sql()` for batch-level price substitution.
     pub input_price: f64,
     pub output_price: f64,
     pub cache_write_price: f64,
@@ -96,11 +75,11 @@ impl Pricing {
                                 models.len(),
                                 p.display()
                             );
-                            return Self::from_models(models, default);
+                            let flat = Self::from_default(default);
+                            log::info!("Loaded pricing for {} models from {}", models.len(), p.display());
+                            return flat;
                         }
-                        Err(e) => {
-                            log::error!("Failed to parse LiteLLM pricing JSON: {}", e)
-                        }
+                        Err(e) => log::error!("Failed to parse LiteLLM pricing JSON: {}", e),
                     }
                 }
                 Err(e) => log::error!("Failed to read pricing file: {}", e),
@@ -108,7 +87,7 @@ impl Pricing {
         }
 
         log::warn!("No pricing file found, using hardcoded defaults");
-        Self::from_models(HashMap::new(), ModelPricing::default())
+        Self::default()
     }
 
     /// Load from `config_dir/litellm.json`, falling back to bundled resource.
@@ -124,14 +103,12 @@ impl Pricing {
         Self::load_with_overrides(user_override, &resolve_bundled_path())
     }
 
-    fn from_models(models: HashMap<String, ModelPricing>, default: ModelPricing) -> Self {
+    fn from_default(default: ModelPricing) -> Self {
         Self {
             input_price: default.input_cost_per_token * 1_000_000.0,
             output_price: default.output_cost_per_token * 1_000_000.0,
             cache_write_price: default.cache_creation_input_token_cost * 1_000_000.0,
             cache_read_price: default.cache_read_input_token_cost * 1_000_000.0,
-            models,
-            default,
         }
     }
 }
@@ -140,29 +117,7 @@ impl Pricing {
 
 impl Default for Pricing {
     fn default() -> Self {
-        Self::from_models(HashMap::new(), ModelPricing::default())
-    }
-}
-
-// ── Per-model lookup ──────────────────────────────────────────────────────
-
-impl Pricing {
-    /// Get per-million-token costs for a specific model.
-    /// Returns default (gpt-4o-mini) pricing if the model is not in the map.
-    pub fn get_per_million(&self, model: &str) -> ModelCost {
-        let m = self.models.get(model).unwrap_or(&self.default);
-        ModelCost {
-            input_price: m.input_cost_per_token * 1_000_000.0,
-            output_price: m.output_cost_per_token * 1_000_000.0,
-            cache_write_price: m.cache_creation_input_token_cost * 1_000_000.0,
-            cache_read_price: m.cache_read_input_token_cost * 1_000_000.0,
-            cost_type: "estimated",
-        }
-    }
-
-    /// The cost type tag for all models.
-    pub fn cost_type(&self) -> &'static str {
-        "estimated"
+        Self::from_default(ModelPricing::default())
     }
 }
 

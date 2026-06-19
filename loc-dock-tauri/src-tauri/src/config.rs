@@ -56,7 +56,6 @@ pub struct Settings {
 pub struct Config {
     pub settings: Settings,
     pub config_dir: PathBuf,
-    pub repos_dir: PathBuf,
     pub pricing: Pricing,
 }
 
@@ -64,9 +63,8 @@ impl Config {
     pub fn load() -> Self {
         let config_dir = Self::config_dir();
         let settings = Settings::load(&config_dir);
-        let repos_dir = settings.repos_dir.clone();
         let pricing = Pricing::load(&config_dir);
-        Config { settings, config_dir, repos_dir, pricing }
+        Config { settings, config_dir, pricing }
     }
 
     pub fn config_dir() -> PathBuf {
@@ -75,10 +73,6 @@ impl Config {
             .join("loc-dock")
     }
 
-    /// Resolve the model pricing file path: user override → bundled resource.
-    pub fn resolve_pricing_path(&self) -> Option<PathBuf> {
-        self.settings.model_pricing_path.clone()
-    }
 }
 
 impl Settings {

@@ -83,10 +83,12 @@ pub fn run() {
         .setup(move |app| {
             let handle = app.handle().clone();
 
-            // Show the dock window immediately, decoupled from the frontend and from
-            // any data loading. Position it bottom-right first so it doesn't flash at
-            // the default spot. The webview paints an instant boot spinner (index.html)
-            // while React + backend data load behind it.
+            // Position the window bottom-right, but keep it hidden. The frontend
+            // emits "frontend-ready" after React mounts; only then do we show the
+            // window. Showing it from setup() races the webview loading and causes
+            // WebView2 navigation errors ("can't read this page"). The boot spinner
+            // in index.html still paints while the JS bundle loads — but the window
+            // stays invisible until the event fires.
             if let Some(win) = app.get_webview_window("main") {
                 if let Ok(Some(monitor)) = win.current_monitor() {
                     let (msize, mpos) = (monitor.size(), monitor.position());
@@ -96,8 +98,16 @@ pub fn run() {
                         let _ = win.set_position(tauri::PhysicalPosition { x, y });
                     }
                 }
-                let _ = win.show();
             }
+
+            // Show window when frontend signals it has mounted
+            let handle3 = handle.clone();
+            handle.listen("frontend-ready", move |_| {
+                if let Some(w) = handle3.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            });
 
             if let Err(e) = tray::setup_tray(&handle) {
                 log::warn!("Failed to setup tray: {}", e);

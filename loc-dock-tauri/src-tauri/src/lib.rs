@@ -83,12 +83,14 @@ pub fn run() {
         .setup(move |app| {
             let handle = app.handle().clone();
 
-            // Position the window bottom-right, but keep it hidden. The frontend
-            // emits "frontend-ready" after React mounts; only then do we show the
-            // window. Showing it from setup() races the webview loading and causes
-            // WebView2 navigation errors ("can't read this page"). The boot spinner
-            // in index.html still paints while the JS bundle loads — but the window
-            // stays invisible until the event fires.
+            // Position the window bottom-right, then explicitly hide it.
+            // The tauri.conf.json sets visible:false but there are known Tauri
+            // bugs (#7669, #5583) where the config is silently ignored — the
+            // window flashes visible on creation. win.hide() here guarantees the
+            // window stays invisible regardless. The frontend emits
+            // "frontend-ready" after React mounts; only then do we show it.
+            // This avoids a WebView2 navigation race that would display
+            // navigation errors the user would see during the flash.
             if let Some(win) = app.get_webview_window("main") {
                 if let Ok(Some(monitor)) = win.current_monitor() {
                     let (msize, mpos) = (monitor.size(), monitor.position());
@@ -98,6 +100,7 @@ pub fn run() {
                         let _ = win.set_position(tauri::PhysicalPosition { x, y });
                     }
                 }
+                let _ = win.hide();
             }
 
             // Show window when frontend signals it has mounted

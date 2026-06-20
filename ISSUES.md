@@ -9,6 +9,44 @@ in commits as `#N`.
 
 ## Open
 
+### #9 — Release build: frontend fails to load (startup bug)
+
+**Symptoms:** On startup, WebView2 shows "Hmm, can't reach this page" in the dock window.
+
+**Root cause — wrong build command.**
+
+`cargo build --release` bypasses `beforeBuildCommand` (`npm run build`) from
+`tauri.conf.json`. Tauri's build script (`tauri_build::build()`) embeds whatever is in
+`../dist` at compile time. If dist is stale, empty, or missing, the webview navigates to
+`tauri://localhost/` and resolves to nothing → "can't reach this page."
+
+Even when dist exists from a prior manual build, bare `cargo build --release` is an
+unsupported path. The contract is `npm run tauri build`:
+
+1. Runs `beforeBuildCommand` → `npm run build` → produces fresh dist/
+2. Embeds frontendDist into the binary via `tauri_build::build()`
+3. Compiles Rust
+4. Bundles NSIS installer
+
+**Not a code bug — a build-process bug.** PR #20's `win.hide()` / `frontend-ready` event
+work is unrelated and only masks load failures; the terminal flash noted in the original
+report was from a separate debug-assertions run, not from `cargo build --release`.
+
+**Already applied:**
+- `base: "./"` in vite.config.ts — stops Tauri from rewriting asset paths to
+  `http://tauri.localhost/` (sub-resource part of issue #13262)
+- PR #20's `frontend-ready` event + `win.hide()` — defensive but irrelevant to the
+  actual root cause
+
+**Fix:**
+```
+cd loc-dock-tauri
+npm run tauri build
+```
+Run the binary produced by that command (NSIS-installed or `target/release/loc-dock.exe`).
+For fast iteration: `npm run build` to refresh dist, then `cargo build --release`.
+But the supported path is `npm run tauri build`.
+
 ### #1 — Code signing not configured
 Installers are unsigned. Windows SmartScreen and macOS Gatekeeper warn on first launch. Needs EV certificate (~$300/yr Windows) or Apple Developer account ($99/yr macOS).
 

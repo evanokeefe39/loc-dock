@@ -160,9 +160,23 @@ schema v8.
 ```bash
 cd loc-dock-tauri
 npm install
-npm run tauri dev       # development
-npm run tauri build     # release (NSIS installer)
+npm run tauri dev       # development (Vite dev server + debug Rust)
+npm run tauri build     # release — runs beforeBuildCommand (npm run build),
+                        # embeds frontend dist, compiles Rust, bundles NSIS/MSI
 ```
+
+**Only `npm run tauri build` produces a working release binary.**
+`cargo build --release` from src-tauri/ bypasses `beforeBuildCommand`, so the
+embedded frontend dist may be stale or missing. The webview navigates to
+`tauri://localhost/` and gets nothing → "can't reach this page."
+
+For fast iteration (after the first `npm run tauri build` has cached DuckDB):
+```bash
+npm run build              # rebuild frontend dist fresh
+cd src-tauri && cargo build --release   # quick Rust-only recompile
+```
+This skips the NSIS bundling. The binary at `target/release/loc-dock.exe` is the
+same binary `npm run tauri build` produces — just without the installer bundle.
 
 ### Tests
 ```bash

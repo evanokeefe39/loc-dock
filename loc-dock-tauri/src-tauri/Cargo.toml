@@ -28,7 +28,6 @@ serde_yaml = "0.9"
 duckdb = { version = "=1.10503.1", features = ["bundled", "chrono"] }
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
-tokio = { version = "1", features = ["time", "sync"] }
 dotenvy = "0.15"
 glob = "0.3"
 log = "0.4"
@@ -36,7 +35,7 @@ env_logger = "0.11"
 dirs = "6"
 regex = "1"
 iana-time-zone = "0.1"
-reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
+ureq = { version = "3", features = ["json"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
 

@@ -65,6 +65,7 @@ pub fn run() {
             commands::restart_app,
             commands::snap_to_corner,
             commands::get_active_tasks,
+            commands::test_llm_connection,
             commands::reset_usage_cache,
             commands::reset_summary_cache,
             commands::get_job_logs,

@@ -214,9 +214,7 @@ impl Settings {
             summary_enabled: std::env::var("LOCDOCK_SUMMARY_ENABLED")
                 .map(|s| s != "false" && s != "0")
                 .unwrap_or(true),
-            llm_api_key: std::env::var("LOCDOCK_LLM_API_KEY")
-                .or_else(|_| std::env::var("DEEPSEEK_API_KEY"))
-                .ok(),
+            llm_api_key: None,
             llm_api_endpoint: std::env::var("LOCDOCK_LLM_ENDPOINT")
                 .unwrap_or_else(|_| "https://api.deepseek.com/v1".to_string()),
             llm_model: std::env::var("LOCDOCK_LLM_MODEL")

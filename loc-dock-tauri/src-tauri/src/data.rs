@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::git;
 use crate::job_log;
 use crate::source_adapter::{GlobFileDiscoverer, SourceKind, SourceManager};
-use crate::summary::{self, SharedSummary, SummaryData};
+use crate::summary::{self, CircuitBreaker, SharedSummary, SummaryData};
 use crate::task_queue::TaskQueue;
 use crate::time_utils;
 use crate::types::*;
@@ -11,6 +11,7 @@ use duckdb::Connection;
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 use chrono_tz::Tz;
 use log::{info, warn};
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -109,6 +110,12 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
             info!("Prefilled day/week/month/year stats from daily_aggregates");
         }
 
+        // ponytail: per-repo cooldown for LLM calls that failed (spares a dead endpoint)
+        let mut failed_summaries: HashMap<String, std::time::Instant> = HashMap::new();
+        let mut circuit_breaker = CircuitBreaker::new();
+        const CB_THRESHOLD: u32 = 3;        // consecutive failures before opening
+        const CB_COOLDOWN: u64 = 60;         // seconds before half-open probe
+
         // Run first refresh immediately, then loop on interval
         loop {
             let cycle_start = std::time::Instant::now();
@@ -142,8 +149,12 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
                 let _ = app.emit("summary-update", &loading_summary);
                 if let Ok(mut g) = summary_state.write() { *g = loading_summary; }
             } else {
-                let data = build_summary_data(&store, &week_utc_str, &day_utc_str);
-                let data = SummaryData { no_api_key: !summary_llm_configured(), ..data };
+                let mut data = build_summary_data(&store, &week_utc_str, &day_utc_str);
+                let has_key = config.read().unwrap().settings.llm_api_key.is_some();
+                if !has_key {
+                    data.loading = false;
+                }
+                let data = SummaryData { no_api_key: !has_key, ..data };
                 if let Ok(mut g) = summary_state.write() { *g = data.clone(); }
                 let _ = app.emit("summary-update", &data);
             }
@@ -163,7 +174,10 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
             let since_ts = store.latest_commit_ts()
                 .map(|ts| ts.min(now_utc))  // clamp future timestamps (e.g. from timezone-shifted old data)
                 .unwrap_or_else(|| now_utc - Duration::days(git_history_days as i64));
-            let since_iso = since_ts.format("%Y-%m-%dT%H:%M:%S%z").to_string();
+            // ponytail: git --after is second-granular but DuckDB TIMESTAMP holds
+            // microseconds. Advance 1s to avoid re-scanning the boundary commit every cycle.
+            let since_iso = (since_ts + Duration::seconds(1))
+                .format("%Y-%m-%dT%H:%M:%S%z").to_string();
 
             let new_commits = git::collect_new_commits(&repos_dir, &since_iso);
             info!("Git scan: {} repos with new commits (since_iso={})", new_commits.len(), since_iso);
@@ -199,10 +213,30 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
             }
             emit!();
 
-            // ── Summaries: trigger LLM for repos with new commits ──
-            if !new_commits.is_empty() && summary_llm_configured() {
+            // ── Summaries: update new-commit repos + retry previously failed repos ──
+            let has_key = config.read().unwrap().settings.llm_api_key.is_some();
+            if has_key {
+                // Check circuit breaker before making any LLM calls.
+                let cb_cooldown = std::time::Duration::from_secs(CB_COOLDOWN);
+                let cb_open = circuit_breaker.is_open(cb_cooldown);
+                let cb_half_open = circuit_breaker.allow_half_open(cb_cooldown);
+                if cb_open && !cb_half_open {
+                    info!("Circuit breaker open — skipping LLM calls this cycle");
+                    // Still emit current summary state (may show loading)
+                    let data = build_summary_data(&store, &week_utc_str, &day_utc_str);
+                    let data = SummaryData { no_api_key: false, ..data };
+                    if let Ok(mut g) = summary_state.write() { *g = data.clone(); }
+                    let _ = app.emit("summary-update", &data);
+                } else {
+                if cb_half_open {
+                    info!("Circuit breaker half-open — allowing one probe call");
+                }
+                let max_calls = if cb_half_open { 1 } else { usize::MAX };
+                let mut calls_made = 0usize;
                 let config_arc = config.clone();
+                // 1. Update repos with new commits (SHA-changed or never cached)
                 for rc in &new_commits {
+                    if calls_made >= max_calls { break; }
                     let cached = store.get_repo_summary(&rc.repo);
                     let needs_update = match &cached {
                         Some((_, last_sha)) => last_sha != &rc.head_sha,
@@ -220,27 +254,94 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
                                 &rc.repo,
                                 &content,
                             );
+                            calls_made += 1;
                             match result {
                                 Ok(highlights) => {
-                                    let json = serde_json::to_string(&highlights).unwrap_or_default();
-                                    store.save_repo_summary(&rc.repo, &rc.head_sha, &json, &cfg.settings.llm_model);
-                                    job_log::log_ok("summary", &format!("{}: {} highlights", rc.repo, highlights.len()));
+                                    circuit_breaker.record_success();
+                                    // Don't cache empty highlights — treat as "not summarized yet"
+                                    // so the retry loop picks it up next cycle.
+                                    if highlights.is_empty() {
+                                        job_log::log_ok("summary", &format!("{}: 0 highlights (skipped cache)", rc.repo));
+                                    } else {
+                                        let json = serde_json::to_string(&highlights).unwrap_or_default();
+                                        store.save_repo_summary(&rc.repo, &rc.head_sha, &json, &cfg.settings.llm_model);
+                                        failed_summaries.remove(&rc.repo);
+                                        job_log::log_ok("summary", &format!("{}: {} highlights", rc.repo, highlights.len()));
+                                    }
                                 }
                                 Err(e) => {
+                                    let opened = circuit_breaker.record_failure(CB_THRESHOLD);
+                                    if opened { warn!("Circuit breaker OPEN after {} consecutive failures", CB_THRESHOLD); }
+                                    failed_summaries.insert(rc.repo.clone(), std::time::Instant::now());
                                     job_log::log_err("summary", &format!("{}: {}", rc.repo, e));
                                 }
                             }
                         }
                     }
                 }
+                // 2. Retry repos with no cached summary, or with cached empty highlights
+                //    (empty highlights were skipped in step 1 — they need retry).
+                let new_repo_names: Vec<&str> = new_commits.iter().map(|rc| rc.repo.as_str()).collect();
+                for repo in &store.all_repos_with_commits() {
+                    if calls_made >= max_calls { break; }
+                    if new_repo_names.contains(&repo.as_str()) { continue; }
+                    // Skip repos with non-empty cached highlights
+                    if let Some((ref hl_json, _)) = store.get_repo_summary(repo) {
+                        let has_content = serde_json::from_str::<Vec<String>>(hl_json)
+                            .map(|v| !v.is_empty())
+                            .unwrap_or(false);
+                        if has_content { continue; }
+                    }
+                    // Cooldown: skip if this repo failed within the last 60s
+                    if let Some(last_fail) = failed_summaries.get(repo) {
+                        if last_fail.elapsed() < std::time::Duration::from_secs(60) { continue; }
+                    }
+                    let cfg = config_arc.read().unwrap();
+                    if let Some(ref key) = cfg.settings.llm_api_key {
+                        let msgs = store.repo_commit_messages_since(repo, week_utc_str);
+                        if msgs.is_empty() { continue; }
+                        let content = msgs.join("\n");
+                        let result = summary::summarize_one_repo(
+                            key,
+                            &cfg.settings.llm_api_endpoint,
+                            &cfg.settings.llm_model,
+                            repo,
+                            &content,
+                        );
+                        calls_made += 1;
+                        match result {
+                            Ok(highlights) => {
+                                circuit_breaker.record_success();
+                                if highlights.is_empty() {
+                                    job_log::log_ok("summary", &format!("{}: 0 highlights (skipped cache, retry)", repo));
+                                } else {
+                                    let json = serde_json::to_string(&highlights).unwrap_or_default();
+                                    // ponytail: save with empty SHA — next new-commit cycle overwrites with real SHA
+                                    store.save_repo_summary(repo, "", &json, &cfg.settings.llm_model);
+                                    failed_summaries.remove(repo);
+                                    job_log::log_ok("summary", &format!("{}: {} highlights (retry)", repo, highlights.len()));
+                                }
+                            }
+                            Err(e) => {
+                                let opened = circuit_breaker.record_failure(CB_THRESHOLD);
+                                if opened { warn!("Circuit breaker OPEN after {} consecutive failures", CB_THRESHOLD); }
+                                failed_summaries.insert(repo.clone(), std::time::Instant::now());
+                                job_log::log_err("summary", &format!("{}: {}", repo, e));
+                            }
+                        }
+                    }
+                }
+                } // close else block (circuit breaker not open)
                 let data = build_summary_data(&store, &week_utc_str, &day_utc_str);
+                let data = SummaryData { no_api_key: false, ..data };
                 if let Ok(mut g) = summary_state.write() { *g = data.clone(); }
                 let _ = app.emit("summary-update", &data);
             } else {
-                // No new commits — emit cached summaries so the panel shows data immediately on warm start
+                warn!("No LLM API key configured — skipping AI summaries. Set it in Settings > AI Summaries > LLM API key.");
                 let data = build_summary_data(&store, &week_utc_str, &day_utc_str);
                 let data = SummaryData {
-                    no_api_key: !summary_llm_configured(),
+                    no_api_key: true,
+                    loading: false,
                     ..data
                 };
                 if let Ok(mut g) = summary_state.write() { *g = data.clone(); }
@@ -499,12 +600,6 @@ fn extract_prs(msgs: &[String]) -> Vec<String> {
         }
     }
     prs
-}
-
-/// Check if any LLM API key is configured (summary enabled is implied).
-fn summary_llm_configured() -> bool {
-    // ponytail: returns true; actual key check happens in the loop body.
-    true
 }
 
 /// Build SummaryData from commit_stats (repos + counts + PRs) + cached highlights.

@@ -4,6 +4,7 @@ use duckdb::Connection;
 use log::info;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 /// Latest computed summary, shared with the `get_summary` command so the UI reads
 /// cached state (instant) instead of triggering on-demand git scans on the main
@@ -32,12 +33,81 @@ pub struct SummaryData {
     pub no_api_key: bool,
 }
 
+// ── Circuit breaker ─────────────────────────────────────────────────
+
+/// Shared circuit breaker for LLM calls. When consecutive failures exceed
+/// the threshold, the circuit opens and further calls are skipped for a
+/// cooldown period. One half-open probe is allowed after cooldown.
+#[derive(Debug)]
+pub struct CircuitBreaker {
+    consecutive_failures: u32,
+    opened_at: Option<Instant>,
+}
+
+impl CircuitBreaker {
+    pub fn new() -> Self {
+        Self { consecutive_failures: 0, opened_at: None }
+    }
+
+    /// Returns true if the circuit is open (all calls should be skipped).
+    pub fn is_open(&self, cooldown: std::time::Duration) -> bool {
+        match self.opened_at {
+            Some(opened) => opened.elapsed() < cooldown,
+            None => false,
+        }
+    }
+
+    /// Record a successful LLM call — closes the circuit.
+    pub fn record_success(&mut self) {
+        self.consecutive_failures = 0;
+        self.opened_at = None;
+    }
+
+    /// Record a failed LLM call. Returns true if the circuit just opened.
+    pub fn record_failure(&mut self, threshold: u32) -> bool {
+        self.consecutive_failures += 1;
+        if self.consecutive_failures >= threshold && self.opened_at.is_none() {
+            self.opened_at = Some(Instant::now());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// After cooldown expires, allow one half-open probe. Returns true
+    /// if the circuit was open but cooldown elapsed (proceed with one call).
+    pub fn allow_half_open(&mut self, cooldown: std::time::Duration) -> bool {
+        match self.opened_at {
+            Some(opened) if opened.elapsed() >= cooldown => {
+                // Stay "open" until the probe result comes back
+                true
+            }
+            _ => false,
+        }
+    }
+
+}
+
+const TEST_PROMPT: &str = "Reply with exactly the word 'ok' and nothing else.";
+
+/// Validate LLM connection with a minimal API call. Returns Ok(()) or an
+/// error message suitable for display.
+pub fn test_connection(api_key: &str, endpoint: &str, model: &str) -> Result<(), String> {
+    // ponytail: use a short timeout for the test — if it takes >10s, fail fast
+    call_llm_with_timeout(api_key, endpoint, model, TEST_PROMPT, "ping", std::time::Duration::from_secs(10))
+        .map(|_| ())
+}
+
 /// Call an OpenAI-compatible chat completions API with retry + exponential backoff.
-fn call_llm(api_key: &str, endpoint: &str, model: &str, prompt: &str, content: &str) -> Result<String, String> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+pub fn call_llm(api_key: &str, endpoint: &str, model: &str, prompt: &str, content: &str) -> Result<String, String> {
+    call_llm_with_timeout(api_key, endpoint, model, prompt, content, std::time::Duration::from_secs(30))
+}
+
+fn call_llm_with_timeout(api_key: &str, endpoint: &str, model: &str, prompt: &str, content: &str, timeout: std::time::Duration) -> Result<String, String> {
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
         .build()
-        .map_err(|e| format!("Client build failed: {}", e))?;
+        .new_agent();
     let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
     let body = serde_json::json!({
         "model": model,
@@ -52,7 +122,6 @@ fn call_llm(api_key: &str, endpoint: &str, model: &str, prompt: &str, content: &
     let mut last_err = String::new();
     for attempt in 0..3 {
         if attempt > 0 {
-            // Exponential backoff with jitter: 1s, 3s base + random 0-1s
             let base_ms = (1000 * (1 << attempt)) as u64;
             let jitter_ms = (std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -62,32 +131,27 @@ fn call_llm(api_key: &str, endpoint: &str, model: &str, prompt: &str, content: &
             info!("LLM retry attempt {} after {}ms", attempt + 1, base_ms + jitter_ms);
         }
 
-        let resp = match client
+        let resp = match agent
             .post(&url)
-            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Authorization", &format!("Bearer {}", api_key))
             .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
+            .send_json(&body)
         {
             Ok(r) => r,
+            Err(ureq::Error::StatusCode(s)) => {
+                last_err = format!("API returned {}", s);
+                if s == 429 || s >= 500 {
+                    continue;   // retryable
+                }
+                return Err(format!("API returned {}", s));
+            }
             Err(e) => {
                 last_err = format!("HTTP request failed: {}", e);
                 continue;
             }
         };
 
-        if resp.status().as_u16() == 429 || resp.status().is_server_error() {
-            last_err = format!("API returned {}", resp.status());
-            continue;
-        }
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().unwrap_or_default();
-            return Err(format!("API returned {}: {}", status, text));
-        }
-
-        let json: serde_json::Value = match resp.json() {
+        let json: serde_json::Value = match resp.into_body().read_json() {
             Ok(j) => j,
             Err(e) => {
                 last_err = format!("JSON parse failed: {}", e);

@@ -13,10 +13,12 @@
   "scripts": {
     "prebuild": "node scripts/download-litellm-pricing.mjs",
     "pretauri": "node scripts/download-litellm-pricing.mjs",
+    "predev": "node scripts/kill-port-1420.mjs",
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "kill": "node scripts/kill-port-1420.mjs & taskkill /F /IM loc-dock.exe /T 2>nul & taskkill /F /IM cargo.exe /T 2>nul & taskkill /F /IM rustc.exe /T 2>nul & echo cleaned"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.101.0",

@@ -168,6 +168,18 @@ pub async fn remove_source(app: AppHandle, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn test_llm_connection(
+    api_key: String,
+    endpoint: String,
+    model: String,
+) -> Result<(), String> {
+    if api_key.is_empty() {
+        return Err("API key is empty".into());
+    }
+    summary::test_connection(&api_key, &endpoint, &model)
+}
+
+#[tauri::command]
 pub async fn update_source(app: AppHandle, id: String, source: DataSourceConfig) -> Result<(), String> {
     let state = app.state::<Arc<RwLock<Config>>>();
     let mut cfg = state.write().unwrap();

@@ -86,6 +86,7 @@ export interface Theme {
 
 export type TimeRange = "day" | "week" | "month" | "year";
 export type ChartMode = "loc" | "cost" | "tokens";
+export type ConnectionStatus = "idle" | "testing" | "ok" | "failed";
 
 export interface RepoSummary {
   name: string;

@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Save } from "lucide-react";
+import { Save, Check, X, Loader } from "lucide-react";
+import { ConnectionStatus } from "../lib/types";
 
 interface DataSourceConfig {
   id: string;
@@ -98,6 +99,8 @@ export function SettingsPanel({ visible, onClose }: Props) {
     enabled: true,
   });
   const [editingSource, setEditingSource] = useState<DataSourceConfig | null>(null);
+  const [connStatus, setConnStatus] = useState<ConnectionStatus>("idle");
+  const [connError, setConnError] = useState<string>("");
   const original = useRef<string>("");
 
   useEffect(() => {
@@ -106,6 +109,8 @@ export function SettingsPanel({ visible, onClose }: Props) {
         setSettings(s);
         original.current = JSON.stringify(s);
         setDirty(false);
+        setConnStatus("idle");
+        setConnError("");
       }).catch(console.error);
     }
   }, [visible]);
@@ -116,6 +121,11 @@ export function SettingsPanel({ visible, onClose }: Props) {
     const updated = { ...settings, [field]: value };
     setSettings(updated);
     setDirty(JSON.stringify(updated) !== original.current);
+    // Reset connection status when LLM config changes
+    if ((field === "llm_api_key" || field === "llm_api_endpoint" || field === "llm_model") && connStatus !== "idle") {
+      setConnStatus("idle");
+      setConnError("");
+    }
   };
 
   const VISUAL_ONLY: (keyof Settings)[] = ["theme_path", "autostart", "hide_repos_without_prs"];
@@ -174,6 +184,23 @@ export function SettingsPanel({ visible, onClose }: Props) {
       setDirty(false);
     } catch (e) {
       console.error('Failed to remove source:', e);
+    }
+  };
+
+  const handleTestConnection = async () => {
+    if (!settings) return;
+    setConnStatus("testing");
+    setConnError("");
+    try {
+      await invoke("test_llm_connection", {
+        apiKey: settings.llm_api_key ?? "",
+        endpoint: settings.llm_api_endpoint,
+        model: settings.llm_model,
+      });
+      setConnStatus("ok");
+    } catch (e) {
+      setConnStatus("failed");
+      setConnError(String(e));
     }
   };
 
@@ -469,6 +496,7 @@ export function SettingsPanel({ visible, onClose }: Props) {
           <span>LLM API key</span>
           <input
             type="password"
+            className={`settings-conn-${connStatus}`}
             value={settings.llm_api_key ?? ""}
             onChange={e => update("llm_api_key", e.target.value || null)}
             placeholder="sk-..."
@@ -478,6 +506,7 @@ export function SettingsPanel({ visible, onClose }: Props) {
         <label title="Base URL for the chat completions API (OpenAI-compatible)">
           <span>LLM endpoint</span>
           <input
+            className={`settings-conn-${connStatus}`}
             value={settings.llm_api_endpoint}
             onChange={e => update("llm_api_endpoint", e.target.value)}
             placeholder="https://api.deepseek.com/v1"
@@ -487,11 +516,29 @@ export function SettingsPanel({ visible, onClose }: Props) {
         <label title="Model name to use for summaries">
           <span>LLM model</span>
           <input
+            className={`settings-conn-${connStatus}`}
             value={settings.llm_model}
             onChange={e => update("llm_model", e.target.value)}
             placeholder="deepseek-chat"
           />
         </label>
+
+        <div className="settings-section-heading settings-conn-header">
+          <span>Connection</span>
+          <button
+            className="settings-conn-test-btn"
+            onClick={handleTestConnection}
+            disabled={connStatus === "testing" || !settings.llm_api_key}
+          >
+            {connStatus === "testing" ? <Loader size={10} className="spin" /> : connStatus === "ok" ? <Check size={10} /> : connStatus === "failed" ? <X size={10} /> : "Test"}
+          </button>
+        </div>
+        {connStatus === "failed" && (
+          <div className="settings-conn-error">{connError}</div>
+        )}
+        {connStatus === "ok" && (
+          <div className="settings-conn-ok">Connection successful</div>
+        )}
 
         <label title="Minimum seconds between LLM calls (prevents excessive API usage)">
           <span>Summary debounce (seconds)</span>

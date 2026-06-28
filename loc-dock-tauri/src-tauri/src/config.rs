@@ -324,7 +324,7 @@ fn default_llm_api_endpoint() -> String {
 }
 
 fn default_llm_model() -> String {
-    "deepseek-chat".to_string()
+    "deepseek-v4-flash".to_string()
 }
 
 fn default_summary_debounce_secs() -> u64 {

@@ -35,6 +35,8 @@ Three chart modes (click to toggle):
 - Settings panel (cog icon) with sticky save/back header
 - **Single-instance guard** -- PID lock file + named-mutex plugin prevents duplicate processes
 - **Config hot-reload** -- save settings without restarting the app
+- **Multi-source data adapters** -- Claude Code, Pi, and Codex CLI (add your own via settings UI)
+- **LiteLLM pricing** -- 2,800+ model prices from the community-maintained LiteLLM JSON
 - **LLM summaries** -- optional AI-generated commit summaries per repo (DeepSeek/OpenAI-compatible)
 - Customizable theme via YAML
 - Auto-creates default theme on first launch
@@ -89,16 +91,18 @@ GitHub Actions builds installers for all platforms and creates a draft release. 
 
 ## Configuration
 
-Settings are accessible via the cog icon in the widget, or by editing `~/.config/loc-dock/.env`:
+Settings are accessible via the cog icon in the widget, or by editing `~/.config/loc-dock/settings.json`. On first launch, Loc-Dock also reads legacy `.env` variables and auto-populates `settings.json`.
 
-| Variable | Default | Description |
+| Key | Default | Description |
 |---|---|---|
-| `LOCDOCK_REPOS_DIR` | `~/repos` | Directory containing your git repositories |
-| `LOCDOCK_CLAUDE_DIR` | `~/.claude` | Claude Code data directory |
-| `LOCDOCK_TIMEZONE` | `Europe/Berlin` | IANA timezone for day boundary |
-| `LOCDOCK_DAY_START_HOUR` | `7` | Hour when "today" starts (24h) |
-| `LOCDOCK_WEEK_START_DAY` | `0` | Day week starts (0=Mon, 6=Sun) |
-| `LOCDOCK_THEME_PATH` | `~/.config/loc-dock/theme.yaml` | Path to theme file |
+| `repos_dir` | `~/repos` | Directory containing your git repositories |
+| `timezone` | `Europe/Berlin` | IANA timezone for day boundary |
+| `day_start_hour` | `7` | Hour when "today" starts (24h) |
+| `week_start_day` | `0` | Day week starts (0=Mon, 6=Sun) |
+| `theme_path` | `~/.config/loc-dock/theme.yaml` | Path to theme file |
+| `autostart` | `false` | Launch on Windows startup |
+| `data_sources` | Auto-detected | List of (adapter, path) pairs — Claude, Pi, Codex CLI |
+| `model_pricing_path` | *(bundled)* | Optional override to LiteLLM pricing JSON |
 
 ## Theming
 
@@ -140,8 +144,10 @@ without prop drilling.
 flowchart LR
     subgraph Sources
         GIT[Git repos]
-        JSONL[Claude / Pi JSONL]
-        CONFIG[settings.json / theme.yaml]
+        SM[SourceManager / GlobFileDiscoverer
+           iterates configured data_sources]
+        CFG[settings.json · theme.yaml
+           LiteLLM pricing · data_sources list]
     end
 
     subgraph "Rust backend"
@@ -150,13 +156,15 @@ flowchart LR
                 bronze/silver/gold
                 commit_stats)]
         LOOP["Data loop (interval)
-              git log → insert_commits
+              SourceManager → ingest per-source
               ETL → refresh_aggregates
+              git log → insert_commits
               LLM summaries on change"]
         STATE[(SharedStats / SharedSummary
                Arc&lt;RwLock&gt;)]
         CMDS[commands.rs · async handlers
-             get_stats · get_summary · get_theme]
+             get_stats · get_summary · get_theme
+             list_sources · add_source · remove_source]
     end
 
     subgraph "React frontend"
@@ -170,7 +178,7 @@ flowchart LR
     end
 
     GIT --> LOOP
-    JSONL --> DUCKDB --> LOOP
+    CFG -- data_sources --> SM --> DUCKDB --> LOOP
     LOOP --> STATE
     STATE --> CMDS
     CMDS <-- "Tauri IPC" --> TQ
@@ -181,13 +189,14 @@ flowchart LR
 ### Data path (medallion ETL)
 
 `usage_store.rs` treats DuckDB as the ETL engine; Rust is thin orchestration. Session
-JSONL flows through three layers:
+JSONL from any configured source (Claude, Pi, Codex CLI via `source_adapter.rs`)
+flows through three layers:
 
 - **Bronze** — ephemeral `read_ndjson_objects` CTE reads raw JSONL via glob with zero
   schema inference (auto-inference OOM-crashes on heterogeneous logs).
 - **Silver** — one `INSERT ... SELECT` per source maps bronze into the canonical
-  `entries` table: typed fields extracted by JSON path, cost flat-priced as a column,
-  deduped by `(source, session_id, ts)`.
+  `entries` table: typed fields extracted by JSON path, cost flat-priced per model
+  via LiteLLM pricing JSON, deduped by `(source, session_id, ts)`.
 - **Gold** — `daily_aggregates`, a materialized per-date/per-source rollup that the
   serving queries read.
 
@@ -224,9 +233,11 @@ this keeps the dev watcher alive.
 3. **Incremental git scan** — Queries `MAX(ts)` from the `commit_stats` table, then runs
    `git log --after={ts}` on each repo. Typically 0–5 new commits, <100ms total. Never
    re-scans past commits.
-4. **DuckDB ETL** — Ingests changed Claude/Pi JSONL files through bronze → silver → gold.
-   Deduped by `(source, session_id, ts)`. Retries `Connection::open` with backoff and
-   WAL cleanup if the previous process crashed.
+4. **DuckDB ETL** — Ingests changed JSONL files from all configured data sources
+   (Claude, Pi, Codex CLI, etc.) through bronze → silver → gold.
+   Cost is flat-priced per model using LiteLLM's pricing JSON (2,800+ models).
+   Deduped by `(source, session_id, ts)`. Retries `Connection::open` with backoff
+   and WAL cleanup if the previous process crashed.
 5. **LLM summaries on change** — For each repo with new commits, checks `head_sha` against
    the `repo_summaries` table. Only calls the LLM when SHA changed. Cached highlights are
    served from the DB.

@@ -49,7 +49,8 @@ Architecture and the per-file map are in [AGENTS.md](AGENTS.md). Top-level dirs:
 
 ## Config
 
-Settings stored in `~/.config/loc-dock/.env` (Windows: `%APPDATA%/loc-dock/.env`). Env vars prefixed `LOCDOCK_`.
+Settings stored in `~/.config/loc-dock/settings.json` (Windows: `%APPDATA%/loc-dock/settings.json`).
+Legacy `.env` variables are migrated to `settings.json` on first load.
 
 ## Issue Tracking
 

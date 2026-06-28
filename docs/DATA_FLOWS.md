@@ -15,7 +15,7 @@ SOURCE ──► DuckDB table ──► Rust struct ──► Tauri IPC ──�
 ```mermaid
 flowchart TD
     subgraph Sources["Source Files (immutable logs)"]
-        JSONL["Claude / Pi JSONL\n~/.claude/**/*.jsonl\n~/.pi/agent/sessions/*.jsonl"]
+        JSONL["Claude / Pi / Codex JSONL\n~/.claude/**/*.jsonl\n~/.pi/agent/sessions/*.jsonl\n~/.codex/sessions/**/*.jsonl"]
         GIT["Git repos\nrepos_dir/*/.git"]
     end
 
@@ -24,7 +24,7 @@ flowchart TD
     end
 
     subgraph Silver["Silver — Cleaned & Typed"]
-        ENTRIES["entries table\nUNIQUE(source, session_id, ts)\nfields by JSON path\ncost flat-priced\ndeduped ON CONFLICT"]
+        ENTRIES["entries table\nUNIQUE(source, session_id, ts)\nfields by JSON path\ncost per model (LiteLLM)\ndeduped ON CONFLICT"]
         COMMIT_STATS["commit_stats table\nUNIQUE(repo, sha)\nincremental git log\nper-commit LOC counts"]
     end
 
@@ -96,6 +96,7 @@ flowchart TD
     subgraph Sources["Source Files"]
         CLAUDE_JSONL["Claude Code\n~/.claude/projects/**/*.jsonl"]
         PI_JSONL["Pi\n~/.pi/agent/sessions/*.jsonl"]
+        CODEX_JSONL["Codex CLI\n~/.codex/sessions/**/*.jsonl"]
     end
 
     subgraph Discovery["File Discovery"]
@@ -108,7 +109,7 @@ flowchart TD
     end
 
     subgraph Silver_
-        ENTRIES["INSERT INTO entries\nsource · session_id · ts\nmodel · input_tokens\noutput_tokens\ncache tokens\ninput_cost · output_cost\ncache_write_cost\ncache_read_cost\ntotal_cost · file_path\n\nUNIQUE(source, session_id, ts)"]
+        ENTRIES["INSERT INTO entries\nsource · session_id · ts\nmodel · input_tokens\noutput_tokens\ncache tokens\ninput_cost · output_cost\ncache_write_cost\ncache_read_cost\ntotal_cost · file_path\ncost per model (LiteLLM)\n\nUNIQUE(source, session_id, ts)"]
     end
 
     subgraph Gold_
@@ -140,6 +141,7 @@ flowchart TD
 
     CLAUDE_JSONL --> SM
     PI_JSONL --> SM
+    CODEX_JSONL --> SM
     SM -->|process_source_named| REGISTRY
     REGISTRY -->|only changed files| BRONZE
     BRONZE -->|INSERT...SELECT\nper-source SQL template| ENTRIES
@@ -175,13 +177,15 @@ flowchart TD
 **Detailed path:**
 
 ```
-~/.claude/projects/**/*.jsonl   ◄── Claude Code writes session logs here
-~/.pi/agent/sessions/*.jsonl    ◄── Pi writes session logs here
+~/.claude/projects/**/*.jsonl        ◄── Claude Code writes session logs here
+~/.pi/agent/sessions/*.jsonl         ◄── Pi writes session logs here
+~/.codex/sessions/**/*.jsonl         ◄── Codex CLI writes session logs here
         │
         ▼
-  SourceManager::with_discoverers
-  ├── GlobFileDiscoverer (claude) — globs projects/subagents paths
-  └── GlobFileDiscoverer (pi)     — globs sessions directory
+  SourceManager::with_discoverers  (built from config data_sources list)
+  ├── GlobFileDiscoverer (claude) — globs projects, skips subagents/
+  ├── GlobFileDiscoverer (pi)     — globs sessions directory
+  └── GlobFileDiscoverer (codex)  — globs sessions/**/*.jsonl
         │
         ▼
   process_source_named(name)  ──┬── filter: only files whose
@@ -197,7 +201,7 @@ flowchart TD
   ┌──────────────────────┐      │
   │  SILVER              │      │    INSERT ... SELECT entries:
   │  entries table        │      │    - fields extracted by JSON path
-  │                      │      │    - cost flat-priced per pricing.yaml
+  │                      │      │    - cost flat-priced per model (LiteLLM JSON)
   │  UNIQUE(source,      │      │    - deduped on conflict (INSERT OR IGNORE)
   │    session_id, ts)   │      │    - per-source SQL templates
   └──────────┬───────────┘      │
@@ -391,7 +395,7 @@ flowchart TD
   Config::load()          Theme::load()
   ├── reads settings.json │   ├── reads theme.yaml
   │   (or migrates .env)  │   └── fills defaults for missing keys
-  └── loads pricing.yaml  │
+  └── loads LiteLLM pricing JSON  │
         │                 │
         ▼                 ▼
   Arc<RwLock<Config>>     Tauri managed state<Theme>

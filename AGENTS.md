@@ -3,16 +3,16 @@
 ## Current Architecture (V2 — SQL-first medallion)
 
 The data layer was rewritten (commits `55a12df`..`4c234e8`, schema v6). DuckDB is the
-ETL engine; Rust is thin orchestration. See [`docs/REFACTOR_PLAN_V2.md`](docs/REFACTOR_PLAN_V2.md)
-for the full plan and spike results, and [`docs/DATA_FLOWS.md`](docs/DATA_FLOWS.md)
+ETL engine; Rust is thin orchestration. See [`docs/DATA_FLOWS.md`](docs/DATA_FLOWS.md)
 for detailed end-to-end data flow diagrams.
 
 ### Single data loop (no independent summary loop)
 
-- `data.rs::spawn_data_loop` — git scan + DuckDB ETL + AI summaries. Builds `AllStats`
-  (day/week/month/year) into `SharedStats` (`Arc<RwLock<AllStats>>`). Prefills all
-  four ranges from `daily_aggregates` for <50ms first paint. Sleeps
-  `refresh_interval.max(10)`s.
+- `data.rs::spawn_data_loop` — builds a `SourceManager` from config's `data_sources` list,
+  ingests changed JSONL files per source through bronze→silver→gold, scans git incrementally,
+  runs AI summaries on changed repos. Builds `AllStats` (day/week/month/year) into
+  `SharedStats` (`Arc<RwLock<AllStats>>`). Prefills all four ranges from `daily_aggregates`
+  for <50ms first paint. Sleeps `refresh_interval.max(10)`s.
 - **Incremental git scan** — `commit_stats` table (`repo, sha, ts, msg, added, deleted`)
   stores per-commit data. Each cycle queries `MAX(ts)` from the table and runs
   `git log --after={ts}` — typically 0–5 new commits → <100ms vs 7.6s re-scanning
@@ -32,16 +32,23 @@ for detailed end-to-end data flow diagrams.
 ### Medallion ETL (`usage_store.rs`):
 
 - **Bronze** — ephemeral `read_ndjson_objects` CTE per batch. Raw JSONL via glob, zero
-  schema inference (`read_ndjson_auto` OOM-crashes on heterogeneous logs — Spike §11).
+  schema inference (`read_ndjson_auto` OOM-crashes on heterogeneous logs).
 - **Silver** — `entries` table. One `INSERT...SELECT` per source loads SQL from
   `.sql` template files (`sql/claude-silver.sql`, `sql/pi-silver.sql`). Extracts
-  fields by JSON path, flat-prices cost via `pricing.yaml`, dedups by
+  fields by JSON path, flat-prices cost per model via LiteLLM JSON, dedups by
   `(source, session_id, ts)`.
 - **Gold** — `daily_aggregates` materialized per-date/per-source rollup. Serving queries
   read gold; multi-day `sessions_total` queries `entries` directly (distinct counts are
-  not additive — Spike 5).
-- **Config-driven** — pricing and silver extraction SQL are externalized to
-  user-editable files. No recompile needed when provider pricing or JSONL schemas change.
+  not additive across days).
+- **Config-driven** — silver extraction SQL is externalized to user-editable `.sql` files
+  (`sql/claude-silver.sql`, `sql/pi-silver.sql`, `sql/codex-silver.sql`). Pricing comes
+  from the community-maintained LiteLLM JSON (2,800+ models). No recompile needed when
+  provider pricing or JSONL schemas change.
+- **Multi-source adapters** — `source_adapter.rs` defines `SourceKind` (Claude, Pi,
+  Codex) and `GlobFileDiscoverer` which walks each configured `data_sources` directory
+  with adapter-specific skip rules (e.g. skips `subagents/` for Claude). The data loop
+  builds a `SourceManager` from the config's `data_sources` list and processes every
+  source on each cycle.
 - **Incremental ingest** — `ingested_files (path, mtime, size)` registry; each cycle
   re-reads only changed files. Cold start micro-batches the full glob to cap JSON-parse
   memory.
@@ -58,6 +65,13 @@ for detailed end-to-end data flow diagrams.
 - **DuckDB open with retry** — `open_usage_cache()` retries `Connection::open` 5× with
   linear backoff (200-1000ms). On retry, removes stale `.wal`/`.tmp` files from crashed
   processes. Handles hot-reload races where `tauri dev` kills + restarts the app.
+- **Deferred window show** — on startup the window is positioned and then hidden. The
+  frontend emits a `frontend-ready` event after React mounts; only then does Rust show
+  the window. This avoids a WebView2 navigation race that would display "can't reach this
+  page" during the flash. The `show-main-window` event (from `tauri-plugin-single-instance`
+  callback) also shows the window, reusing the same handler.
+- **Close to tray** — `WindowEvent::CloseRequested` is intercepted: `api.prevent_close()`
+  + `win.hide()` keeps the app running in the system tray.
 
 ### Config hot-reload (no restart needed):
 
@@ -65,8 +79,9 @@ for detailed end-to-end data flow diagrams.
 - `save_settings` writes to disk + reloads the shared `RwLock` from a fresh `Config::load()`.
 - `restart_app` is now a **no-op** — settings take effect immediately. Under `tauri dev`,
   the old `app.restart()` killed the dev watcher, leaving an orphaned app.
-- The data loop re-reads config each cycle via a `read_config()` closure — API key,
-  model, and endpoint changes are picked up live without restart.
+- The data loop re-reads config each cycle via `config.read().unwrap()` on the shared
+  `Arc<RwLock<Config>>` — API key, model, endpoint, and data_sources changes are picked
+  up live without restart.
 
 ## Lessons Learned
 
@@ -87,10 +102,10 @@ Findings that still bind current code.
 
 ### `Connection` is `Send` but not `Clone`
 
-DuckDB's `Connection` implements `Send` but not `Clone`. To share a single `Database`
-handle across threads, use `Connection::try_clone()` which returns a `Result<Connection>`.
-This is used in `lib.rs` setup to give both the data loop and summary loop a connection
-backed by the same in-memory `Database` handle. Do not call `Connection::open()` twice.
+DuckDB's `Connection` implements `Send` but not `Clone`. The connection is opened once
+in `lib.rs` and passed into `spawn_data_loop` — only one thread uses it. If you ever need
+to share across threads, use `Connection::try_clone()`. Never call `Connection::open()`
+twice on the same database.
 
 ### Stale WAL files block DuckDB open
 
@@ -141,13 +156,15 @@ schema v8.
 | `src/summary.rs` | Types (`RepoSummary`, `SummaryData`), LLM helpers, `summarize_one_repo()` | No more `spawn_summary_loop` — summaries are triggered by the data loop |
 | `loc-dock-tauri/src-tauri/sql/claude-silver.sql` | Claude silver extraction SQL template | user override: `~/.config/loc-dock/sql/claude-silver.sql` |
 | `loc-dock-tauri/src-tauri/sql/pi-silver.sql` | Pi silver extraction SQL template | user override: `~/.config/loc-dock/sql/pi-silver.sql` |
-| `src/pricing.rs` | `Pricing` struct loaded from `pricing.yaml` | externalized; user edits without recompile |
+| `loc-dock-tauri/src-tauri/sql/codex-silver.sql` | Codex CLI silver extraction SQL template | same override pattern |
+| `src/source_adapter.rs` | Source kinds, data source config, glob discoverer | `SourceKind::Claude|Pi|Codex`; `GlobFileDiscoverer` with skip-subdir support |
+| `src/pricing.rs` | `Pricing` struct loaded from LiteLLM JSON | per-model pricing from community-maintained JSON; user override via `model_pricing_path` |
 | `src/task_queue.rs` | Active-task tracking for the UI | — |
 | `src/job_log.rs` | Job-run logging | — |
 | `src/time_utils.rs` | Day/week boundary math | — |
 | `src/types.rs` | `AllStats`, `RangeStats` structs | — |
 | `src/commands.rs` | Async Tauri command handlers | non-blocking; `restart_app` is a no-op |
-| `src/config.rs` | `.env` settings load + settings.json persistence | `LOCDOCK_*` |
+| `src/config.rs` | Settings: `settings.json` read/write + `.env` migration | loads LiteLLM pricing; `LOCDOCK_*` env vars as migration fallback |
 | `src/theme.rs` | YAML theme load | multi-document support |
 | `src/tray.rs` | System tray | — |
 | `loc-dock-tauri/src/hooks/queries.ts` | TanStack Query hooks: `useStatsQuery`, `useSummaryQuery`, `useThemeQuery` | polling interval 10s; event-driven summary cache updates |

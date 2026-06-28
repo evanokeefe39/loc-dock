@@ -1,6 +1,6 @@
 [package]
 name = "loc-dock"
-version = "0.2.0"
+version = "0.2.2"
 description = "Floating desktop widget that tracks your daily dev metrics at a glance"
 default-run = "loc-dock"
 authors = ["Evan O'Keefe"]

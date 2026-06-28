@@ -205,3 +205,19 @@ cargo test    # incl. silver parity + idempotency tests in usage_store.rs + git 
 - `loc-dock-tauri/tauri.conf.json`
 - `loc-dock-tauri/src-tauri/Cargo.toml`
 - `loc-dock-tauri/package.json`
+
+## Key Paths
+
+| Path | Platform | Purpose |
+|------|----------|----------|
+| `%APPDATA%/loc-dock/` | Windows | Config directory (settings, theme, overrides) |
+| `~/.config/loc-dock/` | Linux | Config directory |
+| `~/Library/Application Support/loc-dock/` | macOS | Config directory |
+| `%APPDATA%/loc-dock/settings.json` | Windows | All user settings (API key, model, autostart, data sources, …) |
+| `%APPDATA%/loc-dock/theme.yaml` | Windows | Visual theme override |
+| `%APPDATA%/loc-dock/sql/` | Windows | SQL template overrides (`claude-silver.sql`, `pi-silver.sql`) |
+| `%APPDATA%/loc-dock/litellm.json` | Windows | Pricing data override |
+| `target/release/loc-dock.exe` | — | Release binary (after `npm run tauri build`) |
+| `HKCU\…\Run` → `LOC Dock` | Windows | Autostart registry key (set via `autostart: true`) |
+
+All config paths use `dirs::config_dir()` (`config.rs:70`). On cold start without settings.json, defaults come from `LOCDOCK_*` env vars or hardcoded fallbacks in `Settings::default()`.

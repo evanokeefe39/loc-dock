@@ -207,6 +207,10 @@ cargo test    # incl. silver parity + idempotency tests in usage_store.rs + git 
 - `loc-dock-tauri/src-tauri/Cargo.toml`
 - `loc-dock-tauri/package.json`
 
+### Releases
+CI/CD (`.github/workflows/release.yml`) builds all platforms automatically on `v*` tag push.
+No manual upload needed — just bump versions, tag, push.
+
 ## Key Paths
 
 | Path | Platform | Purpose |

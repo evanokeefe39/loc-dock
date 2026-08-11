@@ -66,6 +66,35 @@ jobs:
           tagName: ${{ github.ref_name }}
           # Release title format: "LOC Dock vX.Y.Z" — consistent across all releases.
           releaseName: "LOC Dock ${{ github.ref_name }}"
+          # Curated template pre-pended to auto-generated notes (see .github/RELEASE_TEMPLATE.md).
+          # Edit this block before tagging to summarize the release.
+          releaseBody: |
+            ## LOC Dock ${{ github.ref_name }}
+
+            _<!-- one-line summary here -->_
+
+            ### What's New
+
+            - _<!-- features -->_
+
+            ### Fixes
+
+            - _<!-- bug fixes -->_
+
+            ### Downloads
+
+            | Platform | File | Notes |
+            |----------|------|-------|
+            | Windows  | `LOC.Dock_${{ github.ref_name | replace('v', '') }}_x64-setup.exe` | NSIS installer |
+            | Windows  | `LOC.Dock_${{ github.ref_name | replace('v', '') }}_x64_en-US.msi` | MSI installer |
+            | macOS    | `LOC.Dock_${{ github.ref_name | replace('v', '') }}_aarch64.dmg` | Apple Silicon |
+            | macOS    | `LOC.Dock_aarch64.app.tar.gz` | Universal binary tarball |
+            | Linux    | `LOC.Dock_${{ github.ref_name | replace('v', '') }}_amd64.deb` | Debian/Ubuntu |
+            | Linux    | `LOC.Dock-${{ github.ref_name | replace('v', '') }}-1.x86_64.rpm` | Fedora/RHEL |
+            | Linux    | `LOC.Dock_${{ github.ref_name | replace('v', '') }}_amd64.AppImage` | Portable |
+            ### Notes
+
+            - _<!-- migration steps, warnings, deprecations -->_
           generateReleaseNotes: true
           releaseDraft: true
           prerelease: false

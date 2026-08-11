@@ -211,6 +211,12 @@ cargo test    # incl. silver parity + idempotency tests in usage_store.rs + git 
 CI/CD (`.github/workflows/release.yml`) builds all platforms automatically on `v*` tag push.
 No manual upload needed — just bump versions, tag, push.
 
+**Release naming convention** — titles are always `LOC Dock vX.Y.Z`.
+The `generateReleaseNotes: true` flag in the workflow auto-generates the changelog body
+from merged PRs and commits. Never hand-edit the release title — the workflow owns it
+consistently. Drafts are published manually after CI completes (see `releaseDraft: true`).
+
+### Version bump locations
 ## Key Paths
 
 | Path | Platform | Purpose |

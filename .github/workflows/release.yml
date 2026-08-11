@@ -64,8 +64,9 @@ jobs:
         with:
           projectPath: loc-dock-tauri
           tagName: ${{ github.ref_name }}
+          # Release title format: "LOC Dock vX.Y.Z" — consistent across all releases.
           releaseName: "LOC Dock ${{ github.ref_name }}"
-          releaseBody: "See the assets below for platform-specific installers."
+          generateReleaseNotes: true
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}

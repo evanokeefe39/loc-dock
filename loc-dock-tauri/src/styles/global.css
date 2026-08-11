@@ -755,6 +755,7 @@ input.settings-conn-failed {
 .settings-source-icon.pi { background: #6366f1; }
 .settings-source-icon.claude { background: #d97706; }
 .settings-source-icon.codex { background: #10a37f; }
+.settings-source-icon.omp { background: #ec4899; }
 .settings-add-icon { background: none; color: var(--text-dim); border: 1px dashed var(--text-dim); }
 .settings-source-card-name {
   font-size: var(--font-xs);

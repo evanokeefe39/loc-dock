@@ -29,18 +29,20 @@ struct SqlTemplates {
     claude_silver: String,
     pi_silver: String,
     codex_silver: String,
+    omp_silver: String,
 }
 
-impl SqlTemplates {
     fn load(config_dir: &Path) -> Self {
         let bundled_claude = include_str!("../sql/claude-silver.sql");
         let bundled_pi = include_str!("../sql/pi-silver.sql");
         let bundled_codex = include_str!("../sql/codex-silver.sql");
+        let bundled_omp = include_str!("../sql/omp-silver.sql");
         let sql_dir = config_dir.join("sql");
         SqlTemplates {
             claude_silver: load_or_fallback(&sql_dir.join("claude-silver.sql"), bundled_claude),
             pi_silver: load_or_fallback(&sql_dir.join("pi-silver.sql"), bundled_pi),
             codex_silver: load_or_fallback(&sql_dir.join("codex-silver.sql"), bundled_codex),
+            omp_silver: load_or_fallback(&sql_dir.join("omp-silver.sql"), bundled_omp),
         }
     }
 
@@ -414,6 +416,7 @@ fn process_source(
         SourceKind::Claude => INGEST_BATCH_FILES,
         SourceKind::Pi => 1,
         SourceKind::Codex => INGEST_BATCH_FILES,
+        SourceKind::Omp => 1,
     };
 
     let mut total = 0usize;
@@ -471,14 +474,16 @@ fn ingest_files(con: &Connection, kind: SourceKind, paths: &[PathBuf], pricing: 
         SourceKind::Claude => templates.format_sql(&templates.claude_silver, &paths_array, pricing),
         SourceKind::Pi => templates.format_sql(&templates.pi_silver, &paths_array, pricing),
         SourceKind::Codex => templates.format_sql(&templates.codex_silver, &paths_array, pricing),
+        SourceKind::Omp => templates.format_sql(&templates.omp_silver, &paths_array, pricing),
     };
 
-    if kind == SourceKind::Pi {
-        // Carry-forward relies on file line order from the scan.
+    // Carry-forward (model_change → assistant rows) needs intra-file row order.
+    let needs_order = matches!(kind, SourceKind::Pi | SourceKind::Omp);
+    if needs_order {
         let _ = con.execute_batch("SET preserve_insertion_order=true;");
     }
     let result = con.execute(&sql, []);
-    if kind == SourceKind::Pi {
+    if needs_order {
         let _ = con.execute_batch("SET preserve_insertion_order=false;");
     }
 
@@ -1112,6 +1117,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
+    #[test]
+    fn omp_silver_model_carryforward_and_cost() {
+        let con = test_con();
+        let pricing = test_pricing();
+        let templates = test_templates();
+        // model_change uses $.model (not $.modelId like Pi).
+        // First assistant has usage → parsed cost. Second has no usage → estimated.
+        let content = "\
+{\"type\":\"model_change\",\"model\":\"deepseek-v4-pro\",\"provider\":\"deepseek\"}
+{\"type\":\"message\",\"timestamp\":\"2025-01-15T00:00:00Z\",\"message\":{\"role\":\"assistant\",\"model\":\"deepseek-v4-pro\",\"provider\":\"deepseek\",\"timestamp\":1736899200000,\"content\":[{\"type\":\"text\",\"text\":\"Fixed the bug.\"}],\"usage\":{\"input\":200,\"output\":300,\"cost\":{\"input\":0.0005,\"output\":0.0015,\"total\":0.002}}}}
+{\"type\":\"message\",\"timestamp\":\"2025-01-15T01:00:00Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Thanks.\"}]}}
+{\"type\":\"message\",\"timestamp\":\"2025-01-15T02:00:00Z\",\"message\":{\"role\":\"assistant\",\"timestamp\":1736906400000,\"content\":[{\"type\":\"text\",\"text\":\"You're welcome! Let me know if you need anything else.\"}]}}
+";
+        let path = write_fixture("2025-01-15T00-00-00-000Z_sessOMP_2025.jsonl", content);
+
+        let n = ingest_files(&con, SourceKind::Omp, std::slice::from_ref(&path), &pricing, &templates).unwrap();
+        assert_eq!(n, 2, "two assistant messages ingest");
+
+        // Model carried forward to second assistant (no explicit model).
+        let models: Vec<String> = {
+            let mut stmt = con.prepare("SELECT model FROM entries ORDER BY ts").unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        assert_eq!(models, vec!["deepseek-v4-pro".to_string(), "deepseek-v4-pro".to_string()]);
+
+        // First row: real cost parsed (0.002).
+        let first_total: f64 = con
+            .query_row("SELECT total_cost FROM entries ORDER BY ts LIMIT 1", [], |r| r.get(0)).unwrap();
+        approx(first_total, 0.002);
+        let first_type: String = con
+            .query_row("SELECT cost_type FROM entries ORDER BY ts LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(first_type, "parsed");
+
+        // Second row: estimated from content (52 chars / 4 = 13 tokens output).
+        let second_tokens: i64 = con
+            .query_row("SELECT output_tokens FROM entries ORDER BY ts DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(second_tokens, 13);
+        let second_type: String = con
+            .query_row("SELECT cost_type FROM entries ORDER BY ts DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(second_type, "estimated");
+
+        // Session ID from filename.
+        let sid: String = con.query_row("SELECT DISTINCT session_id FROM entries", [], |r| r.get(0)).unwrap();
+        assert_eq!(sid, "sessOMP");
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
     #[test]
     fn commit_stats_insert_and_bucket() {
         // Test that commits inserted with UTC-naive timestamps are correctly

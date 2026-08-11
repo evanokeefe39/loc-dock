@@ -157,7 +157,8 @@ schema v8.
 | `loc-dock-tauri/src-tauri/sql/claude-silver.sql` | Claude silver extraction SQL template | user override: `~/.config/loc-dock/sql/claude-silver.sql` |
 | `loc-dock-tauri/src-tauri/sql/pi-silver.sql` | Pi silver extraction SQL template | user override: `~/.config/loc-dock/sql/pi-silver.sql` |
 | `loc-dock-tauri/src-tauri/sql/codex-silver.sql` | Codex CLI silver extraction SQL template | same override pattern |
-| `src/source_adapter.rs` | Source kinds, data source config, glob discoverer | `SourceKind::Claude|Pi|Codex`; `GlobFileDiscoverer` with skip-subdir support |
+| `loc-dock-tauri/src-tauri/sql/omp-silver.sql` | Oh My Pi silver extraction SQL template | same override pattern |
+| `src/source_adapter.rs` | Source kinds, data source config, glob discoverer | `SourceKind::Claude\|Pi\|Codex\|Omp`; `GlobFileDiscoverer` with skip-subdir support |
 | `src/pricing.rs` | `Pricing` struct loaded from LiteLLM JSON | per-model pricing from community-maintained JSON; user override via `model_pricing_path` |
 | `src/task_queue.rs` | Active-task tracking for the UI | — |
 | `src/job_log.rs` | Job-run logging | — |

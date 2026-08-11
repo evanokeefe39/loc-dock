@@ -326,6 +326,7 @@ export function SettingsPanel({ visible, onClose }: Props) {
                 <option value="pi">Pi</option>
                 <option value="claude">Claude Code</option>
                 <option value="codex">Codex CLI</option>
+                <option value="omp">Oh My Pi</option>
               </select>
             </label>
             <label>
@@ -399,6 +400,7 @@ export function SettingsPanel({ visible, onClose }: Props) {
                 <option value="pi">Pi</option>
                 <option value="claude">Claude Code</option>
                 <option value="codex">Codex CLI</option>
+                <option value="omp">Oh My Pi</option>
               </select>
             </label>
             <label>

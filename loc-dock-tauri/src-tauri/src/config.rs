@@ -258,6 +258,12 @@ impl Default for Settings {
                     display_name: "Pi".to_string(),
                     path: pd.join("agent").join("sessions"),
                 },
+                DataSourceConfig {
+                    id: "omp-main".to_string(),
+                    adapter: "omp".to_string(),
+                    display_name: "Oh My Pi".to_string(),
+                    path: home.join(".omp").join("agent").join("sessions"),
+                },
             ],
             timezone: default_timezone(),
             day_start_hour: 7,

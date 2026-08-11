@@ -32,6 +32,7 @@ struct SqlTemplates {
     omp_silver: String,
 }
 
+impl SqlTemplates {
     fn load(config_dir: &Path) -> Self {
         let bundled_claude = include_str!("../sql/claude-silver.sql");
         let bundled_pi = include_str!("../sql/pi-silver.sql");

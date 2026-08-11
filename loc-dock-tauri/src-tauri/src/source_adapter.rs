@@ -6,10 +6,12 @@ use std::time::SystemTime;
 
 /// Identifies which silver-layer extraction SQL applies to a source's files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceKind {
     Claude,
     Pi,
     Codex,
     Omp,
+}
 
 impl SourceKind {
     pub fn name(self) -> &'static str {

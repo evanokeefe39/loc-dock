@@ -28,6 +28,3 @@ _One-line summary of the release._
 
 - Migration steps, deprecation warnings, or important callouts for upgraders.
 
----
-
-**Full Changelog**: https://github.com/evanokeefe39/loc-dock/compare/vPREVIOUS...vCURRENT

@@ -203,7 +203,7 @@ cargo test    # incl. silver parity + idempotency tests in usage_store.rs + git 
 ```
 
 ### Version bump locations
-- `loc-dock-tauri/tauri.conf.json`
+- `loc-dock-tauri/src-tauri/tauri.conf.json`
 - `loc-dock-tauri/src-tauri/Cargo.toml`
 - `loc-dock-tauri/package.json`
 
@@ -214,9 +214,18 @@ No manual upload needed — just bump versions, tag, push.
 **Release naming convention** — titles are always `LOC Dock vX.Y.Z`.
 The `generateReleaseNotes: true` flag in the workflow auto-generates the changelog body
 from merged PRs and commits. Never hand-edit the release title — the workflow owns it
-consistently. Drafts are published manually after CI completes (see `releaseDraft: true`).
+consistently.
 
-### Version bump locations
+**Per-release notes** — edit `.github/RELEASE_TEMPLATE.md` before tagging (the `X.Y.Z`
+placeholders are substituted with the tagged version). Release notes no longer live in
+the workflow file.
+
+**Auto-publish** — after all three platform builds succeed, a `publish` job flips the
+draft to a published release (`gh release edit --draft=false`). No manual publish step.
+A failed build leg leaves the draft unpublished for inspection. A `verify-version` job
+gates the build: the tag must match `tauri.conf.json`, `Cargo.toml`, and `package.json`,
+or the release fails before building.
+
 ## Key Paths
 
 | Path | Platform | Purpose |

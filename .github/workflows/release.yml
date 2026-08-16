@@ -56,6 +56,10 @@ jobs:
         with:
           workspaces: loc-dock-tauri/src-tauri -> target
 
+      - name: Compute clean version
+        id: version
+        shell: bash
+        run: echo "clean=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
       - name: Build and release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -87,13 +91,13 @@ jobs:
 
             | Platform | File | Notes |
             |----------|------|-------|
-            | Windows  | `LOC.Dock_${{ replace(github.ref_name, 'v', '') }}_x64-setup.exe` | NSIS installer |
-            | Windows  | `LOC.Dock_${{ replace(github.ref_name, 'v', '') }}_x64_en-US.msi` | MSI installer |
-            | macOS    | `LOC.Dock_${{ replace(github.ref_name, 'v', '') }}_aarch64.dmg` | Apple Silicon |
+            | Windows  | `LOC.Dock_${{ steps.version.outputs.clean }}_x64-setup.exe` | NSIS installer |
+            | Windows  | `LOC.Dock_${{ steps.version.outputs.clean }}_x64_en-US.msi` | MSI installer |
+            | macOS    | `LOC.Dock_${{ steps.version.outputs.clean }}_aarch64.dmg` | Apple Silicon |
             | macOS    | `LOC.Dock_aarch64.app.tar.gz` | Universal binary tarball |
-            | Linux    | `LOC.Dock_${{ replace(github.ref_name, 'v', '') }}_amd64.deb` | Debian/Ubuntu |
-            | Linux    | `LOC.Dock-${{ replace(github.ref_name, 'v', '') }}-1.x86_64.rpm` | Fedora/RHEL |
-            | Linux    | `LOC.Dock_${{ replace(github.ref_name, 'v', '') }}_amd64.AppImage` | Portable |
+            | Linux    | `LOC.Dock_${{ steps.version.outputs.clean }}_amd64.deb` | Debian/Ubuntu |
+            | Linux    | `LOC.Dock-${{ steps.version.outputs.clean }}-1.x86_64.rpm` | Fedora/RHEL |
+            | Linux    | `LOC.Dock_${{ steps.version.outputs.clean }}_amd64.AppImage` | Portable |
             ### Notes
 
             - v0.2.3 was drafted but never published; v0.2.4 supersedes it.

@@ -9,7 +9,24 @@ permissions:
   contents: write
 
 jobs:
+  verify-version:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Tag must match all three version files
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CONF=$(jq -r .version loc-dock-tauri/src-tauri/tauri.conf.json)
+          CARGO=$(grep -m1 '^version' loc-dock-tauri/src-tauri/Cargo.toml | cut -d'"' -f2)
+          NPM=$(jq -r .version loc-dock-tauri/package.json)
+          echo "tag=$TAG  tauri.conf=$CONF  cargo=$CARGO  npm=$NPM"
+          if [ "$TAG" != "$CONF" ] || [ "$TAG" != "$CARGO" ] || [ "$TAG" != "$NPM" ]; then
+            echo "::error::version mismatch — bump all three files to $TAG"
+            exit 1
+          fi
   build:
+    needs: [verify-version]
     strategy:
       fail-fast: false
       matrix:
@@ -60,6 +77,15 @@ jobs:
         id: version
         shell: bash
         run: echo "clean=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Render release notes
+        id: notes
+        shell: bash
+        run: |
+          {
+            echo 'body<<RELEASE_BODY_EOF'
+            sed "s/X\.Y\.Z/${{ steps.version.outputs.clean }}/g" .github/RELEASE_TEMPLATE.md
+            echo 'RELEASE_BODY_EOF'
+          } >> "$GITHUB_OUTPUT"
       - name: Build and release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -70,39 +96,18 @@ jobs:
           tagName: ${{ github.ref_name }}
           # Release title format: "LOC Dock vX.Y.Z" — consistent across all releases.
           releaseName: "LOC Dock ${{ github.ref_name }}"
-          # Curated template pre-pended to auto-generated notes (see .github/RELEASE_TEMPLATE.md).
-          # Edit this block before tagging to summarize the release.
-          releaseBody: |
-            ## LOC Dock ${{ github.ref_name }}
-
-            _Bug-fix release: the summary panel no longer gets stuck on "loading…" when the LLM returns empty output._
-
-            ### What's New
-
-            - Oh My Pi (OMP) session usage tracking connector
-            - Release workflow now bundles installers for Windows (NSIS + MSI), macOS (Apple Silicon), and Linux (deb/rpm/AppImage) with a download table
-
-            ### Fixes
-
-            - Summary panel stuck on "loading…" with no AI highlights — empty LLM responses (reasoning-model token burn) are now loud failures that trip the circuit breaker instead of a silent infinite retry loop
-            - OMP connector: missing enum declaration from the merge
-
-            ### Downloads
-
-            | Platform | File | Notes |
-            |----------|------|-------|
-            | Windows  | `LOC.Dock_${{ steps.version.outputs.clean }}_x64-setup.exe` | NSIS installer |
-            | Windows  | `LOC.Dock_${{ steps.version.outputs.clean }}_x64_en-US.msi` | MSI installer |
-            | macOS    | `LOC.Dock_${{ steps.version.outputs.clean }}_aarch64.dmg` | Apple Silicon |
-            | macOS    | `LOC.Dock_aarch64.app.tar.gz` | Universal binary tarball |
-            | Linux    | `LOC.Dock_${{ steps.version.outputs.clean }}_amd64.deb` | Debian/Ubuntu |
-            | Linux    | `LOC.Dock-${{ steps.version.outputs.clean }}-1.x86_64.rpm` | Fedora/RHEL |
-            | Linux    | `LOC.Dock_${{ steps.version.outputs.clean }}_amd64.AppImage` | Portable |
-            ### Notes
-
-            - v0.2.3 was drafted but never published; v0.2.4 supersedes it.
-            - Repos whose summaries failed before this release are retried automatically on the next cycle — no manual cache reset needed.
+          # Curated release notes from .github/RELEASE_TEMPLATE.md; X.Y.Z placeholders
+          # are substituted with the clean version. Edit the template before tagging.
+          releaseBody: ${{ steps.notes.outputs.body }}
           generateReleaseNotes: true
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+  publish:
+    needs: [build]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Publish release
+        run: gh release edit ${{ github.ref_name }} --draft=false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -965,7 +965,8 @@ mod tests {
         cache_read_input_tokens BIGINT NOT NULL DEFAULT 0,
         input_cost DOUBLE NOT NULL DEFAULT 0.0, output_cost DOUBLE NOT NULL DEFAULT 0.0,
         cache_write_cost DOUBLE NOT NULL DEFAULT 0.0, cache_read_cost DOUBLE NOT NULL DEFAULT 0.0,
-        total_cost DOUBLE NOT NULL DEFAULT 0.0, file_path TEXT NOT NULL,
+        total_cost DOUBLE NOT NULL DEFAULT 0.0, cost_type TEXT NOT NULL DEFAULT 'estimated',
+        file_path TEXT NOT NULL,
         UNIQUE(source, session_id, ts, file_path)
     );";
 
@@ -1152,10 +1153,12 @@ mod tests {
             .query_row("SELECT cost_type FROM entries ORDER BY ts LIMIT 1", [], |r| r.get(0)).unwrap();
         assert_eq!(first_type, "parsed");
 
-        // Second row: estimated from content (52 chars / 4 = 13 tokens output).
+        // Second row: estimated from content (54 chars / 4 = 13.5 → 14 rounded
+        // when stored into the BIGINT output_tokens column; DuckDB `/` on
+        // integers yields DOUBLE, not truncated integer division).
         let second_tokens: i64 = con
             .query_row("SELECT output_tokens FROM entries ORDER BY ts DESC LIMIT 1", [], |r| r.get(0)).unwrap();
-        assert_eq!(second_tokens, 13);
+        assert_eq!(second_tokens, 14);
         let second_type: String = con
             .query_row("SELECT cost_type FROM entries ORDER BY ts DESC LIMIT 1", [], |r| r.get(0)).unwrap();
         assert_eq!(second_type, "estimated");

@@ -72,7 +72,7 @@ ex AS (
     (
       SELECT COALESCE(SUM(length(COALESCE(json_extract_string(value, '$.text'), ''))), 0)
       FROM json_each(json_extract(j, '$.message.content'))
-      WHERE json_type(value) = 'object'
+      WHERE json_type(value) = 'OBJECT'
     ) / 4 AS est_tokens,
     -- Flag: was real usage data present?
     json_extract(j, '$.message.usage') IS NULL AS usage_missing,

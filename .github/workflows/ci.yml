@@ -1,12 +1,6 @@
 name: CI
 
 on:
-  push:
-    branches: [master, main]
-    paths:
-      - "loc-dock-tauri/**"
-      - "!loc-dock-tauri/**/*.md"
-      - ".github/workflows/**"
   pull_request:
     branches: [master, main]
     paths:
@@ -73,3 +67,7 @@ jobs:
       - name: Check Rust
         working-directory: loc-dock-tauri/src-tauri
         run: cargo check
+      - name: Test Rust
+        if: matrix.platform == 'ubuntu-24.04'
+        working-directory: loc-dock-tauri/src-tauri
+        run: cargo test

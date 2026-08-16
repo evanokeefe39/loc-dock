@@ -93,6 +93,8 @@ export interface RepoSummary {
   commits: number;
   prs: string[];
   highlights: string[];
+  /** True when a cached summary exists (even an explicit empty `[]`). */
+  summarized: boolean;
 }
 
 export interface SummaryData {

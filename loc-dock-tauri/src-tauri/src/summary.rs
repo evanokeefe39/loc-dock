@@ -17,6 +17,9 @@ pub struct RepoSummary {
     pub commits: usize,
     pub prs: Vec<String>,
     pub highlights: Vec<String>,
+    /// True when a cached summary entry exists (even an explicit empty `[]`).
+    /// Lets the UI distinguish "summarized, nothing to show" from "still pending".
+    pub summarized: bool,
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -98,6 +101,12 @@ pub fn test_connection(api_key: &str, endpoint: &str, model: &str) -> Result<(),
         .map(|_| ())
 }
 
+/// Token cap for LLM responses. Was 512 — a reasoning model (deepseek-v4-flash)
+/// can spend the entire budget on `reasoning_content` and return empty `content`
+/// with `finish_reason: "length"`. Raised so a normal reasoning chain + the
+/// 1-4 highlight answer fit; input is also truncated (see data.rs) so this is
+/// not an open-ended spend.
+const MAX_LLM_TOKENS: u32 = 2048;
 /// Call an OpenAI-compatible chat completions API with retry + exponential backoff.
 pub fn call_llm(api_key: &str, endpoint: &str, model: &str, prompt: &str, content: &str) -> Result<String, String> {
     call_llm_with_timeout(api_key, endpoint, model, prompt, content, std::time::Duration::from_secs(30))
@@ -116,7 +125,7 @@ fn call_llm_with_timeout(api_key: &str, endpoint: &str, model: &str, prompt: &st
             { "role": "user", "content": content }
         ],
         "temperature": 0.3,
-        "max_tokens": 512
+        "max_tokens": MAX_LLM_TOKENS
     });
 
     let mut last_err = String::new();
@@ -159,10 +168,30 @@ fn call_llm_with_timeout(api_key: &str, endpoint: &str, model: &str, prompt: &st
             }
         };
 
-        return json["choices"][0]["message"]["content"]
-            .as_str()
-            .map(|s| s.to_string())
-            .ok_or_else(|| "No content in API response".to_string());
+        // Loud failures: log exactly what came back so an empty-content response
+        // is diagnosable without endpoint spelunking. deepseek-v4-flash can burn
+        // the whole max_tokens budget on reasoning_content and return empty
+        // content with finish_reason=length — that is a FAILURE, not success.
+        let choice = &json["choices"][0];
+        let msg = &choice["message"];
+        let finish_reason = choice["finish_reason"].as_str().unwrap_or("unknown");
+        let response_text = msg["content"].as_str().unwrap_or_default();
+        let reasoning_len = msg["reasoning_content"].as_str().map(|s| s.len()).unwrap_or(0);
+        info!(
+            "LLM response: content={} chars, reasoning_content={} chars, finish_reason={}, usage={}",
+            response_text.len(),
+            reasoning_len,
+            finish_reason,
+            json["usage"]
+        );
+
+        if !response_text.is_empty() {
+            return Ok(response_text.to_string());
+        }
+        return Err(format!(
+            "LLM returned empty content (finish_reason={}, reasoning_content={} chars, max_tokens={})",
+            finish_reason, reasoning_len, MAX_LLM_TOKENS
+        ));
     }
 
     Err(format!("All retries failed: {}", last_err))
@@ -177,16 +206,48 @@ Focus on what changed, not how. No fluff. Example: \
 [\"Added user auth with JWT tokens\",\"Fixed payment webhook retry logic\"]. \
 Return ONLY the JSON array, no other text.";
 
+/// Parse the LLM's raw response into highlight strings. Strict by design:
+/// empty or non-JSON output is an error (loud failure), never silently empty
+/// highlights — an empty result previously read as "not summarized yet" and
+/// wedged the summary panel on "loading…" forever.
+fn parse_highlights(text: &str) -> Result<Vec<String>, String> {
+    let cleaned = text.trim().trim_start_matches("```json").trim_end_matches("```").trim();
+    if cleaned.is_empty() {
+        return Err("empty LLM response (no content)".to_string());
+    }
+    if let Ok(v) = serde_json::from_str::<Vec<String>>(cleaned) {
+        return Ok(v);
+    }
+    // Some models wrap the array in prose — extract the bracketed span.
+    if let Some(start) = cleaned.find('[') {
+        if let Some(end) = cleaned.rfind(']') {
+            if end > start {
+                let inner = &cleaned[start..=end];
+                if let Ok(v) = serde_json::from_str::<Vec<String>>(inner) {
+                    return Ok(v);
+                }
+            }
+        }
+    }
+    Err("response is not a JSON array of strings".to_string())
+}
+
 /// Summarize one repo's commit messages and return highlights.
 pub fn summarize_one_repo(api_key: &str, endpoint: &str, model: &str, repo: &str, content: &str) -> Result<Vec<String>, String> {
     match call_llm(api_key, endpoint, model, REPO_PROMPT, content) {
-        Ok(text) => {
-            let cleaned = text.trim().trim_start_matches("```json").trim_end_matches("```").trim();
-            job_log::log_ok("summary", &format!("LLM response for {}: {} chars", repo, cleaned.len()));
-            Ok(serde_json::from_str::<Vec<String>>(cleaned).unwrap_or_else(|_| {
-                cleaned.lines().take(4).map(|l| l.trim().trim_matches('"').to_string()).collect()
-            }))
-        }
+        Ok(text) => match parse_highlights(&text) {
+            Ok(highlights) => {
+                job_log::log_ok("summary", &format!("LLM response for {}: {} chars -> {} highlights", repo, text.len(), highlights.len()));
+                Ok(highlights)
+            }
+            Err(e) => {
+                // Loud: log the raw (truncated) response — the old silent
+                // line-split fallback hid this class of failure for weeks.
+                let snippet: String = text.chars().take(500).collect();
+                job_log::log_err("summary", &format!("{}: unparseable LLM response ({}): {}", repo, e, snippet));
+                Err(format!("LLM response unparseable for {}: {}", repo, e))
+            }
+        },
         Err(e) => Err(format!("LLM failed for {}: {}", repo, e)),
     }
 }
@@ -199,4 +260,47 @@ pub fn reset_summaries(config: &Config) -> Result<(), String> {
     }
     job_log::log_ok("summary", "Summary cache reset");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_highlights;
+
+    #[test]
+    fn parse_empty_is_error() {
+        assert!(parse_highlights("").is_err());
+        assert!(parse_highlights("   ").is_err());
+    }
+
+    #[test]
+    fn parse_valid_array() {
+        let v = parse_highlights("[\"Added auth\",\"Fixed retry\"]").unwrap();
+        assert_eq!(v, vec!["Added auth".to_string(), "Fixed retry".to_string()]);
+    }
+
+    #[test]
+    fn parse_code_fenced_array() {
+        let v = parse_highlights("```json\n[\"hi\"]\n```").unwrap();
+        assert_eq!(v, vec!["hi".to_string()]);
+    }
+
+    #[test]
+    fn parse_empty_array_is_ok() {
+        // A valid explicit [] is an answer (nothing worth highlighting),
+        // distinct from an empty response (failure).
+        let v = parse_highlights("[]").unwrap();
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn parse_prose_wrapped_array() {
+        let v = parse_highlights("Here you go: [\"one\", \"two\"] hope that helps").unwrap();
+        assert_eq!(v, vec!["one".to_string(), "two".to_string()]);
+    }
+
+    #[test]
+    fn parse_garbage_is_error() {
+        assert!(parse_highlights("not json at all").is_err());
+        assert!(parse_highlights("{'obj': 1}").is_err());
+    }
 }

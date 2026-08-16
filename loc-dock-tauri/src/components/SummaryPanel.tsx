@@ -34,8 +34,10 @@ export function SummaryPanel({ summary, range, hideNoPrs }: Props) {
   const prs = range === "day" ? summary.day_prs : summary.week_prs;
 
   const hasRepos = repos.length > 0;
-  const hasHighlights = repos.some(r => r.highlights.length > 0);
-  const awaitingSummary = hasRepos && !hasHighlights && !summary.no_api_key;
+  // awaitingSummary: repos exist but none have a cached summary yet — the
+  // backend is still generating (or retrying). `summarized` is true for repos
+  // with a cached entry even if it's an explicit empty [] — those render cards.
+  const awaitingSummary = hasRepos && repos.some(r => !r.summarized) && !summary.no_api_key;
 
   useEffect(() => {
     if (!summary.loading) return;

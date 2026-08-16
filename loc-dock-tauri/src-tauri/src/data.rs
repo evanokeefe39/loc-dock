@@ -243,10 +243,10 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
                         None => true,
                     };
                     if needs_update {
-                        let msgs: Vec<&str> = rc.commits.iter().map(|c| c.msg.as_str()).collect();
-                        let content = msgs.join("\n");
+                        // rc.commits is newest-first (git log order); build_llm_content keeps the newest.
+                        let content = build_llm_content(&rc.commits.iter().map(|c| c.msg.as_str()).collect::<Vec<_>>());
                         let cfg = config_arc.read().unwrap();
-                        if let Some(ref key) = cfg.settings.llm_api_key {
+                        if let Some(key) = &cfg.settings.llm_api_key {
                             let result = summary::summarize_one_repo(
                                 key,
                                 &cfg.settings.llm_api_endpoint,
@@ -257,17 +257,13 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
                             calls_made += 1;
                             match result {
                                 Ok(highlights) => {
+                                    // A valid response (even an explicit []) is an answer —
+                                    // cache it so we don't re-call the LLM every cycle.
                                     circuit_breaker.record_success();
-                                    // Don't cache empty highlights — treat as "not summarized yet"
-                                    // so the retry loop picks it up next cycle.
-                                    if highlights.is_empty() {
-                                        job_log::log_ok("summary", &format!("{}: 0 highlights (skipped cache)", rc.repo));
-                                    } else {
-                                        let json = serde_json::to_string(&highlights).unwrap_or_default();
-                                        store.save_repo_summary(&rc.repo, &rc.head_sha, &json, &cfg.settings.llm_model);
-                                        failed_summaries.remove(&rc.repo);
-                                        job_log::log_ok("summary", &format!("{}: {} highlights", rc.repo, highlights.len()));
-                                    }
+                                    let json = serde_json::to_string(&highlights).unwrap_or_default();
+                                    store.save_repo_summary(&rc.repo, &rc.head_sha, &json, &cfg.settings.llm_model);
+                                    failed_summaries.remove(&rc.repo);
+                                    job_log::log_ok("summary", &format!("{}: {} highlights", rc.repo, highlights.len()));
                                 }
                                 Err(e) => {
                                     let opened = circuit_breaker.record_failure(CB_THRESHOLD);
@@ -285,22 +281,22 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
                 for repo in &store.all_repos_with_commits() {
                     if calls_made >= max_calls { break; }
                     if new_repo_names.contains(&repo.as_str()) { continue; }
-                    // Skip repos with non-empty cached highlights
-                    if let Some((ref hl_json, _)) = store.get_repo_summary(repo) {
-                        let has_content = serde_json::from_str::<Vec<String>>(hl_json)
-                            .map(|v| !v.is_empty())
-                            .unwrap_or(false);
-                        if has_content { continue; }
+                    // Skip repos with ANY cached summary — a valid explicit [] is
+                    // an answer too; only truly un-summarized repos need retry.
+                    if let Some((hl_json, _)) = &store.get_repo_summary(repo) {
+                        if serde_json::from_str::<Vec<String>>(hl_json).is_ok() { continue; }
                     }
                     // Cooldown: skip if this repo failed within the last 60s
                     if let Some(last_fail) = failed_summaries.get(repo) {
                         if last_fail.elapsed() < std::time::Duration::from_secs(60) { continue; }
                     }
                     let cfg = config_arc.read().unwrap();
-                    if let Some(ref key) = cfg.settings.llm_api_key {
+                    if let Some(key) = &cfg.settings.llm_api_key {
                         let msgs = store.repo_commit_messages_since(repo, week_utc_str);
                         if msgs.is_empty() { continue; }
-                        let content = msgs.join("\n");
+                        // NOTE: repo_commit_messages_since is oldest-first (ORDER BY ts);
+                        // build_llm_content takes the TAIL so the NEWEST commits survive.
+                        let content = build_llm_content(&msgs);
                         let result = summary::summarize_one_repo(
                             key,
                             &cfg.settings.llm_api_endpoint,
@@ -312,15 +308,11 @@ pub fn spawn_data_loop(app: AppHandle, config: Arc<RwLock<Config>>, stats: Share
                         match result {
                             Ok(highlights) => {
                                 circuit_breaker.record_success();
-                                if highlights.is_empty() {
-                                    job_log::log_ok("summary", &format!("{}: 0 highlights (skipped cache, retry)", repo));
-                                } else {
-                                    let json = serde_json::to_string(&highlights).unwrap_or_default();
-                                    // ponytail: save with empty SHA — next new-commit cycle overwrites with real SHA
-                                    store.save_repo_summary(repo, "", &json, &cfg.settings.llm_model);
-                                    failed_summaries.remove(repo);
-                                    job_log::log_ok("summary", &format!("{}: {} highlights (retry)", repo, highlights.len()));
-                                }
+                                let json = serde_json::to_string(&highlights).unwrap_or_default();
+                                // ponytail: save with empty SHA — next new-commit cycle overwrites with real SHA
+                                store.save_repo_summary(repo, "", &json, &cfg.settings.llm_model);
+                                failed_summaries.remove(repo);
+                                job_log::log_ok("summary", &format!("{}: {} highlights (retry)", repo, highlights.len()));
                             }
                             Err(e) => {
                                 let opened = circuit_breaker.record_failure(CB_THRESHOLD);
@@ -602,9 +594,27 @@ fn extract_prs(msgs: &[String]) -> Vec<String> {
     prs
 }
 
-/// Build SummaryData from commit_stats (repos + counts + PRs) + cached highlights.
-/// Repos with commits but no cached highlights are included with empty highlights
-/// and `loading` is set to true so the panel shows "Summaries are being generated...".
+const MAX_SUMMARY_COMMIT_MSGS: usize = 20;
+
+/// Build LLM user content from commit messages, keeping only the NEWEST
+/// `MAX_SUMMARY_COMMIT_MSGS`. Callers feed both newest-first (git log) and
+/// oldest-first (`ORDER BY ts`) lists, so take the TAIL — newest either way.
+/// The prompt asks for 1-4 highlights; dozens of messages bloat the input and
+/// drive reasoning-token burn that can exhaust max_tokens before any content
+/// is emitted (see summary.rs MAX_LLM_TOKENS).
+fn build_llm_content(msgs: &[impl AsRef<str>]) -> String {
+    let total = msgs.len();
+    let start = total.saturating_sub(MAX_SUMMARY_COMMIT_MSGS);
+    let mut out = msgs[start..].iter().map(|m| m.as_ref()).collect::<Vec<_>>().join("\n");
+    if start > 0 {
+        out.push_str(&format!("\n\n(showing newest {} of {} commits)", total - start, total));
+    }
+    out
+}
+
+/// Build SummaryData from commit_stats (repos + counts + PRs) + cached summaries.
+/// Repos with commits but no cached summary entry are marked un-summarized and
+/// `loading` is set to true so the panel shows "Summaries are being generated...".
 fn build_summary_data(store: &UsageStore, week_utc_str: &str, day_utc_str: &str) -> SummaryData {
     let all_repos = store.all_repos_with_commits();
     let highlight_map: std::collections::HashMap<String, String> = store
@@ -616,7 +626,7 @@ fn build_summary_data(store: &UsageStore, week_utc_str: &str, day_utc_str: &str)
     let mut week_repos = Vec::new();
     let mut day_total = 0usize;
     let mut week_total = 0usize;
-    let mut any_missing_highlights = false;
+    let mut any_missing_summaries = false;
 
     for repo in &all_repos {
         let week_count = store.count_repo_commits_since(repo, week_utc_str);
@@ -624,17 +634,16 @@ fn build_summary_data(store: &UsageStore, week_utc_str: &str, day_utc_str: &str)
         if week_count == 0 && day_count == 0 { continue; }
 
         let cached_json = highlight_map.get(repo);
-        let highlights: Vec<String> = cached_json
-            .and_then(|j| serde_json::from_str(j).ok())
-            .unwrap_or_default();
-        let has_highlights = !highlights.is_empty();
+        let parsed: Option<Vec<String>> = cached_json.and_then(|j| serde_json::from_str(j).ok());
+        let has_summary = parsed.is_some();
+        let highlights = parsed.unwrap_or_default();
 
         let day_msgs = store.repo_commit_messages_since(repo, day_utc_str);
         let week_msgs = store.repo_commit_messages_since(repo, week_utc_str);
-        let day_prs = if has_highlights { extract_prs(&day_msgs) } else { Vec::new() };
-        let week_prs = if has_highlights { extract_prs(&week_msgs) } else { Vec::new() };
+        let day_prs = if has_summary { extract_prs(&day_msgs) } else { Vec::new() };
+        let week_prs = if has_summary { extract_prs(&week_msgs) } else { Vec::new() };
 
-        if !has_highlights { any_missing_highlights = true; }
+        if !has_summary { any_missing_summaries = true; }
 
         if week_count > 0 {
             week_repos.push(summary::RepoSummary {
@@ -642,6 +651,7 @@ fn build_summary_data(store: &UsageStore, week_utc_str: &str, day_utc_str: &str)
                 commits: week_count,
                 prs: week_prs,
                 highlights: highlights.clone(),
+                summarized: has_summary,
             });
             week_total += week_count;
         }
@@ -651,6 +661,7 @@ fn build_summary_data(store: &UsageStore, week_utc_str: &str, day_utc_str: &str)
                 commits: day_count,
                 prs: day_prs,
                 highlights,
+                summarized: has_summary,
             });
             day_total += day_count;
         }
@@ -670,8 +681,35 @@ fn build_summary_data(store: &UsageStore, week_utc_str: &str, day_utc_str: &str)
         week_repo_count: week_count,
         week_commits: week_total,
         week_prs: week_prs_total,
-        loading: any_missing_highlights,
+        loading: any_missing_summaries,
         no_api_key: false,
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::build_llm_content;
+
+    #[test]
+    fn content_truncates_to_newest_twenty() {
+        let msgs: Vec<String> = (0..50).map(|i| format!("commit {}", i)).collect();
+        let content = build_llm_content(&msgs);
+        assert!(content.starts_with("commit 30"));
+        assert!(content.contains("showing newest 20 of 50 commits"));
+        assert!(!content.contains("commit 0"));
+    }
+
+    #[test]
+    fn content_under_cap_is_unchanged() {
+        let msgs: Vec<String> = (0..5).map(|i| format!("commit {}", i)).collect();
+        let content = build_llm_content(&msgs);
+        assert_eq!(content, "commit 0\ncommit 1\ncommit 2\ncommit 3\ncommit 4");
+    }
+
+    #[test]
+    fn content_empty_input_is_empty() {
+        let msgs: Vec<String> = Vec::new();
+        assert_eq!(build_llm_content(&msgs), "");
+    }
+}

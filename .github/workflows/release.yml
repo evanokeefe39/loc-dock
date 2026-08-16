@@ -71,15 +71,17 @@ jobs:
           releaseBody: |
             ## LOC Dock ${{ github.ref_name }}
 
-            _<!-- one-line summary here -->_
+            _Bug-fix release: the summary panel no longer gets stuck on "loading…" when the LLM returns empty output._
 
             ### What's New
 
-            - _<!-- features -->_
+            - Oh My Pi (OMP) session usage tracking connector
+            - Release workflow now bundles installers for Windows (NSIS + MSI), macOS (Apple Silicon), and Linux (deb/rpm/AppImage) with a download table
 
             ### Fixes
 
-            - _<!-- bug fixes -->_
+            - Summary panel stuck on "loading…" with no AI highlights — empty LLM responses (reasoning-model token burn) are now loud failures that trip the circuit breaker instead of a silent infinite retry loop
+            - OMP connector: missing enum declaration from the merge
 
             ### Downloads
 
@@ -94,7 +96,8 @@ jobs:
             | Linux    | `LOC.Dock_${{ github.ref_name | replace('v', '') }}_amd64.AppImage` | Portable |
             ### Notes
 
-            - _<!-- migration steps, warnings, deprecations -->_
+            - v0.2.3 was drafted but never published; v0.2.4 supersedes it.
+            - Repos whose summaries failed before this release are retried automatically on the next cycle — no manual cache reset needed.
           generateReleaseNotes: true
           releaseDraft: true
           prerelease: false
